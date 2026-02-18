@@ -1,0 +1,100 @@
+{
+  "name": "@classytic/realtime-agents",
+  "version": "0.1.0",
+  "description": "Provider-agnostic realtime voice agent orchestration for React (OpenAI Realtime, Gemini Live)",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc",
+    "dev": "tsdown --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "keywords": [
+    "react",
+    "voice-agent",
+    "realtime",
+    "openai",
+    "gemini",
+    "webrtc",
+    "websocket",
+    "ai-agent",
+    "voice",
+    "typescript",
+    "react-19",
+    "provider-agnostic",
+    "tool-calling"
+  ],
+  "dependencies": {
+    "zod-to-json-schema": "^3.24.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "zod": "^3.0.0 || ^4.0.0",
+    "@openai/agents": ">=0.4.0",
+    "@google/genai": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@openai/agents": {
+      "optional": true
+    },
+    "@google/genai": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@google/genai": "^1.38.0",
+    "@openai/agents": "^0.4.6",
+    "@types/react": "^19.0.0",
+    "publint": "^0.3.17",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsdown": "^0.12.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.0.0",
+    "zod": "^3.0.0 || ^4.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Classytic",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/classytic/realtime-agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/classytic/realtime-agents/issues"
+  },
+  "homepage": "https://github.com/classytic/realtime-agents#readme",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./openai": {
+      "types": "./dist/openai/index.d.ts",
+      "import": "./dist/openai/index.js"
+    },
+    "./gemini": {
+      "types": "./dist/gemini/index.d.ts",
+      "import": "./dist/gemini/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}
