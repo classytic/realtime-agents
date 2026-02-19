@@ -43,6 +43,8 @@ export class GeminiAdapter implements RealtimeAdapter {
   private isMuted = false;
   /** Active audio sources — tracked so interrupt() can stop them */
   private activeSources: Set<AudioBufferSourceNode> = new Set();
+  /** Whether the server has signalled turn completion (audio may still be playing) */
+  private turnCompleteReceived = false;
 
   private activeTools: Map<string, AgentTool> = new Map();
 
@@ -131,6 +133,7 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.externalStream = false;
     this.connected = true;
     this.resolvedSession = null;
+    this.turnCompleteReceived = false;
 
     const apiKey = await options.getCredentials();
     const ai = new GoogleGenAI({ apiKey });
@@ -258,6 +261,7 @@ export class GeminiAdapter implements RealtimeAdapter {
       try { source.stop(); } catch { /* already stopped */ }
     }
     this.activeSources.clear();
+    this.turnCompleteReceived = false;
 
     if (this.outputAudioContext) {
       this.nextStartTime = this.outputAudioContext.currentTime;
@@ -475,6 +479,7 @@ export class GeminiAdapter implements RealtimeAdapter {
 
       // ── Turn complete — finalize transcripts and reset IDs ──
       if (serverContent.turnComplete) {
+        this.turnCompleteReceived = true;
         // Finalize user transcript if pending
         if (this.currentUserItemId) {
           this.handlers?.onTranscriptComplete({
@@ -494,7 +499,12 @@ export class GeminiAdapter implements RealtimeAdapter {
         // Reset for next turn
         this.currentUserItemId = null;
         this.currentAssistantItemId = null;
-        this.handlers?.onAgentStatusChange('idle');
+        // Only go idle if all audio has finished playing.
+        // Audio sources are scheduled ahead of time — they may still be
+        // playing even after the server signals turn completion.
+        if (this.activeSources.size === 0) {
+          this.handlers?.onAgentStatusChange('idle');
+        }
       }
     }
 
@@ -619,6 +629,9 @@ export class GeminiAdapter implements RealtimeAdapter {
       message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
 
     if (base64Audio) {
+      // New audio chunk arriving — clear turnComplete so we stay in 'speaking'
+      // until the server signals the turn is done AND all audio finishes.
+      this.turnCompleteReceived = false;
       this.handlers?.onAgentStatusChange('speaking');
 
       if (this.nextStartTime < this.outputAudioContext.currentTime) {
@@ -642,7 +655,11 @@ export class GeminiAdapter implements RealtimeAdapter {
 
         source.onended = () => {
           this.activeSources.delete(source);
-          this.handlers?.onAgentStatusChange('idle');
+          // Only go idle when ALL sources are done AND the server has
+          // signalled turn completion (same pattern as OpenAI's audioPlayingRef).
+          if (this.activeSources.size === 0 && this.turnCompleteReceived) {
+            this.handlers?.onAgentStatusChange('idle');
+          }
         };
       } catch (e) {
         console.error('[GeminiAdapter] Audio decode error', e);
@@ -755,6 +772,7 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.activeTools.clear();
     this.currentUserItemId = null;
     this.currentAssistantItemId = null;
+    this.turnCompleteReceived = false;
     // Don't reset lastSessionHandle — consumers may need it after disconnect
   }
 }

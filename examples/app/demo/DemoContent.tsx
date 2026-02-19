@@ -244,52 +244,102 @@ export default function DemoContent() {
     setIsMuted(next);
   }, [isMuted, mute]);
 
-  // Audio visualizer — available for Gemini (always) and OpenAI (WebSocket only)
-  const outputAnalyser = useMemo(() => {
-    if (!isConnected) return null;
-    if (provider === 'gemini') {
-      return (adapter as GeminiAdapter).getOutputAnalyser();
-    }
-    if (provider === 'openai' && selectedTransport === 'websocket') {
-      return (adapter as OpenAIAdapter).getOutputAnalyser();
-    }
-    return null;
-  }, [isConnected, provider, selectedTransport, adapter]);
-
-  // Input audio visualizer — create our own AnalyserNode from react-stream's mic stream.
-  // react-stream gives us the raw MediaStream; we build a visualization-only audio graph
-  // (not connected to destination, so no feedback loop).
-  const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
-  const inputCtxRef = useRef<AudioContext | null>(null);
+  // ─── Output audio visualizer ───
+  // The adapter exposes getOutputAnalyser() for all transports:
+  // - WebSocket: AnalyserNode from the playback AudioContext
+  // - WebRTC: AnalyserNode from the <audio> element's srcObject
+  // - Gemini: AnalyserNode from the WebSocket playback context
+  const [outputAnalyser, setOutputAnalyser] = useState<AnalyserNode | null>(null);
 
   useEffect(() => {
-    const micStream = rsMicrophone?.stream;
-    if (!micStream || provider !== 'gemini') {
+    if (!isConnected) {
+      setOutputAnalyser(null);
+      return;
+    }
+    // The adapter creates the WebRTC analyser asynchronously (polls srcObject),
+    // so we poll getOutputAnalyser() until it's ready.
+    const poll = setInterval(() => {
+      const analyser = provider === 'gemini'
+        ? (adapter as GeminiAdapter).getOutputAnalyser()
+        : (adapter as OpenAIAdapter).getOutputAnalyser();
+      if (analyser) {
+        setOutputAnalyser(analyser);
+        clearInterval(poll);
+      }
+    }, 300);
+    // Also check immediately for WebSocket/Gemini which are ready synchronously
+    const immediate = provider === 'gemini'
+      ? (adapter as GeminiAdapter).getOutputAnalyser()
+      : (adapter as OpenAIAdapter).getOutputAnalyser();
+    if (immediate) {
+      setOutputAnalyser(immediate);
+      clearInterval(poll);
+    }
+    return () => {
+      clearInterval(poll);
+      setOutputAnalyser(null);
+    };
+  }, [isConnected, provider, adapter]);
+
+  // ─── Input audio visualizer (mic) ───
+  // Gemini: use react-stream's mic stream.
+  // OpenAI: capture a separate mic stream for visualization only
+  //         (WebRTC manages the actual mic internally).
+  const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
+  const inputCtxRef = useRef<AudioContext | null>(null);
+  const inputStreamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (!isConnected) {
+      cleanup();
+      return;
+    }
+
+    // For Gemini, use react-stream's mic stream
+    const micStream = provider === 'gemini' ? rsMicrophone?.stream : null;
+    if (provider === 'gemini' && !micStream) {
+      cleanup();
+      return;
+    }
+
+    // For OpenAI, capture our own mic stream for visualization
+    if (provider === 'openai') {
+      navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      }).then((stream) => {
+        inputStreamRef.current = stream;
+        createAnalyser(stream);
+      }).catch(() => { /* mic access denied — skip visualizer */ });
+      return cleanup;
+    }
+
+    // Gemini path — micStream is already available
+    createAnalyser(micStream!);
+    return cleanup;
+
+    function createAnalyser(stream: MediaStream) {
+      const ctx = new AudioContext();
+      ctx.resume();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      inputCtxRef.current = ctx;
+      setInputAnalyser(analyser);
+    }
+
+    function cleanup() {
       setInputAnalyser(null);
       if (inputCtxRef.current) {
         inputCtxRef.current.close();
         inputCtxRef.current = null;
       }
-      return;
+      if (inputStreamRef.current) {
+        inputStreamRef.current.getTracks().forEach((t) => t.stop());
+        inputStreamRef.current = null;
+      }
     }
-
-    const ctx = new AudioContext();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    const source = ctx.createMediaStreamSource(micStream);
-    source.connect(analyser);
-    // No connection to ctx.destination — visualization only
-
-    inputCtxRef.current = ctx;
-    setInputAnalyser(analyser);
-
-    return () => {
-      source.disconnect();
-      ctx.close();
-      inputCtxRef.current = null;
-      setInputAnalyser(null);
-    };
-  }, [provider, rsMicrophone?.stream]);
+  }, [isConnected, provider, rsMicrophone?.stream]);
 
   // Video frame capture is handled inside GeminiAdapter automatically.
   // When the adapter's MediaStream has video tracks, it captures JPEG frames

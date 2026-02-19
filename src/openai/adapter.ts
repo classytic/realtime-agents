@@ -29,6 +29,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private session: RealtimeSession | null = null;
   private handlers: TransportEventHandlers | null = null;
   private activeResponseRef = false;
+  private audioPlayingRef = false;
   private usageSnapshot: Record<string, unknown> | null = null;
 
   private readonly transport: 'webrtc' | 'websocket';
@@ -37,6 +38,11 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private readonly transcriptionModel: string;
   private readonly vadEagerness: string;
   private readonly contextManagement: { mode: 'auto' | 'disabled'; retentionRatio?: number };
+
+  // ── WebRTC output audio visualization ──
+  private webrtcAudioCtx: AudioContext | null = null;
+  private webrtcAnalyser: AnalyserNode | null = null;
+  private webrtcPollTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── WebSocket-only audio pipeline ──
   private wsConnected = false;
@@ -86,9 +92,9 @@ export class OpenAIAdapter implements RealtimeAdapter {
     return {};
   }
 
-  /** Get the AnalyserNode for audio output visualization (WebSocket only) */
+  /** Get the AnalyserNode for audio output visualization (all transports). */
   getOutputAnalyser(): AnalyserNode | null {
-    return this.wsAnalyser;
+    return this.wsAnalyser ?? this.webrtcAnalyser;
   }
 
   async connect(options: ConnectOptions, handlers: TransportEventHandlers): Promise<void> {
@@ -135,9 +141,11 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.wireSessionEvents();
     await this.session.connect({ apiKey: ephemeralKey });
 
-    // Start WebSocket audio pipeline (mic capture + audio playback)
+    // Start transport-specific audio pipeline
     if (this.transport === 'websocket') {
       await this.startWebSocketAudio(options.mediaStream);
+    } else if (options.audioElement) {
+      this.startWebRTCAnalyser(options.audioElement);
     }
 
     // Pre-seed conversation history if provided
@@ -186,8 +194,10 @@ export class OpenAIAdapter implements RealtimeAdapter {
       this.session.close();
       this.session = null;
     }
+    this.cleanupWebRTCAnalyser();
     this.cleanupWebSocketAudio();
     this.activeResponseRef = false;
+    this.audioPlayingRef = false;
     this.handlers = null;
   }
 
@@ -292,6 +302,48 @@ export class OpenAIAdapter implements RealtimeAdapter {
       }
     }
     return this.usageSnapshot;
+  }
+
+  // ── WebSocket Audio Pipeline ──
+
+  // ── WebRTC Output Analyser ──
+
+  /**
+   * Create an AnalyserNode from the WebRTC <audio> element's srcObject.
+   * The SDK sets srcObject asynchronously via peerConnection.ontrack,
+   * so we poll until the MediaStream is available.
+   */
+  private startWebRTCAnalyser(audioElement: HTMLAudioElement): void {
+    this.webrtcPollTimer = setInterval(() => {
+      const stream = audioElement.srcObject as MediaStream | null;
+      if (stream && stream.getAudioTracks().length > 0) {
+        if (this.webrtcPollTimer) {
+          clearInterval(this.webrtcPollTimer);
+          this.webrtcPollTimer = null;
+        }
+        const ctx = new AudioContext();
+        ctx.resume();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        const source = ctx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        // Don't connect to ctx.destination — <audio> element handles playback
+        this.webrtcAudioCtx = ctx;
+        this.webrtcAnalyser = analyser;
+      }
+    }, 200);
+  }
+
+  private cleanupWebRTCAnalyser(): void {
+    if (this.webrtcPollTimer) {
+      clearInterval(this.webrtcPollTimer);
+      this.webrtcPollTimer = null;
+    }
+    if (this.webrtcAudioCtx) {
+      this.webrtcAudioCtx.close();
+      this.webrtcAudioCtx = null;
+    }
+    this.webrtcAnalyser = null;
   }
 
   // ── WebSocket Audio Pipeline ──
@@ -479,26 +531,42 @@ export class OpenAIAdapter implements RealtimeAdapter {
     // ── Transport events ──
     sess.on('transport_event', (event: { type: string; [key: string]: unknown }) => {
       switch (event.type) {
-        // Response lifecycle
+        // ── Response lifecycle ──
         case 'response.created':
           this.activeResponseRef = true;
+          handlers.onAgentStatusChange('thinking');
           break;
         case 'response.done':
           this.activeResponseRef = false;
-          handlers.onAgentStatusChange('idle');
-          // Defer usage read — SDK updates session.usage after this handler returns
           queueMicrotask(() => this.emitUsageUpdate());
+          // WebRTC: audio may still be playing through the media track.
+          // Only go idle if the audio buffer has already stopped.
+          if (!this.audioPlayingRef) {
+            handlers.onAgentStatusChange('idle');
+          }
           break;
 
-        // Audio playback status
-        case 'response.audio.delta':
+        // ── Audio output ──
+        // WebSocket: response.output_audio.delta fires per PCM chunk
+        // WebRTC: audio goes via RTP media track — transcript deltas and
+        //         output_audio_buffer events track playback state instead
+        case 'response.output_audio.delta':
+        case 'response.output_audio_transcript.delta':
           handlers.onAgentStatusChange('speaking');
           break;
-        case 'response.content_part.done':
-          handlers.onAgentStatusChange('idle');
+        case 'output_audio_buffer.started':
+          this.audioPlayingRef = true;
+          handlers.onAgentStatusChange('speaking');
+          break;
+        case 'output_audio_buffer.stopped':
+        case 'output_audio_buffer.cleared':
+          this.audioPlayingRef = false;
+          if (!this.activeResponseRef) {
+            handlers.onAgentStatusChange('idle');
+          }
           break;
 
-        // Voice activity detection
+        // ── Voice activity detection ──
         case 'input_audio_buffer.speech_started':
           handlers.onAgentStatusChange('listening');
           handlers.onUserSpeechStart?.();

@@ -640,7 +640,7 @@ export function CameraPreview({
 }
 
 // =============================================================================
-// AUDIO VISUALIZER (Gemini-only — uses AnalyserNode)
+// AUDIO VISUALIZER
 // =============================================================================
 
 export function AudioVisualizer({
