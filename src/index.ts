@@ -23,6 +23,9 @@ export type {
   UseRealtimeSessionReturn,
   UsageInfo,
   ContextManagement,
+  ReconnectConfig,
+  AutoReconnectCallbacks,
+  UseAutoReconnectReturn,
 } from './types.js';
 
 export type {
@@ -41,6 +44,7 @@ export { buildInstructions } from './build-instructions.js';
 
 // ── Hooks ──
 export { useRealtimeSession } from './use-realtime-session.js';
+export { useAutoReconnect } from './use-auto-reconnect.js';
 export { useSessionHistory } from './use-session-history.js';
 
 // ── Context Providers ──

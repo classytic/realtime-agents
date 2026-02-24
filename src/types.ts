@@ -145,6 +145,32 @@ export interface TransportEventHandlers {
   readonly onUsageUpdate?: (usage: UsageInfo) => void;
 }
 
+// ── Reconnection ──
+
+/**
+ * Configuration for automatic session reconnection.
+ *
+ * Used by `useAutoReconnect` to control retry behavior when the session
+ * disconnects unexpectedly (network drop, server restart, etc.).
+ */
+export interface ReconnectConfig {
+  /** Maximum reconnection attempts before giving up (default: 3) */
+  readonly maxAttempts?: number;
+  /** Initial delay in ms before first retry (default: 1000) */
+  readonly baseDelay?: number;
+  /** Maximum delay in ms with exponential backoff (default: 8000) */
+  readonly maxDelay?: number;
+  /**
+   * Whether to re-inject transcript history on reconnect (default: true).
+   *
+   * When enabled, accumulated transcripts from the disconnected session are
+   * passed as `history` on reconnect so the agent has conversational context.
+   * Gemini sessions using `prepareReconnect()` may not need this since session
+   * resumption preserves full context server-side.
+   */
+  readonly injectHistory?: boolean;
+}
+
 // ── Adapter Interface ──
 
 /**
@@ -166,6 +192,19 @@ export interface RealtimeAdapter {
   sendSimulatedUserMessage(text: string): void;
   getUsage(): Record<string, unknown> | null;
   readonly providerName: string;
+
+  /**
+   * Optional: prepare the adapter for reconnection.
+   *
+   * Called by `useAutoReconnect` before each retry attempt. Adapters can use
+   * this to configure provider-specific reconnection strategies:
+   *
+   * - **Gemini**: Sets `sessionResumption.handle` from the last received handle
+   *   so the reconnected session resumes where it left off.
+   * - **OpenAI**: No-op (OpenAI has no session resumption; history injection
+   *   is handled at the hook level).
+   */
+  prepareReconnect?(): void;
 }
 
 // ── Session Callbacks ──
@@ -200,4 +239,30 @@ export interface UseRealtimeSessionReturn {
   readonly getUsage: () => Record<string, unknown> | null;
   /** Reactive usage state — updates in real-time as tokens are consumed */
   readonly usage: UsageInfo | null;
+}
+
+// ── Auto-Reconnect Hook Types ──
+
+/**
+ * Extended callbacks for `useAutoReconnect` — includes all `SessionCallbacks`
+ * plus reconnection lifecycle events.
+ */
+export interface AutoReconnectCallbacks extends SessionCallbacks {
+  /** Fired before each reconnection attempt. */
+  readonly onReconnecting?: (attempt: number, maxAttempts: number) => void;
+  /** Fired when reconnection succeeds. */
+  readonly onReconnected?: () => void;
+  /** Fired when all reconnection attempts are exhausted. */
+  readonly onReconnectFailed?: (error: Error) => void;
+}
+
+/**
+ * Return type for `useAutoReconnect` — extends `UseRealtimeSessionReturn`
+ * with reconnection state.
+ */
+export interface UseAutoReconnectReturn extends UseRealtimeSessionReturn {
+  /** Whether a reconnection is currently in progress */
+  readonly isReconnecting: boolean;
+  /** Current reconnection attempt (0 = not reconnecting) */
+  readonly reconnectAttempt: number;
 }

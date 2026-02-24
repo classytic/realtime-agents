@@ -68,7 +68,7 @@ export class GeminiAdapter implements RealtimeAdapter {
   private readonly enableOutputTranscription: boolean;
   private readonly enableVideo: boolean;
   private readonly videoFrameInterval: number;
-  private readonly sessionResumption?: { handle?: string; transparent?: boolean };
+  private sessionResumption?: { handle?: string; transparent?: boolean };
   private readonly contextManagement: { mode: 'auto' | 'disabled'; triggerTokens?: number; retentionRatio?: number };
 
   /** Latest session resumption handle received from the server */
@@ -117,6 +117,22 @@ export class GeminiAdapter implements RealtimeAdapter {
    */
   getSessionResumptionHandle(): string | null {
     return this.lastSessionHandle;
+  }
+
+  /**
+   * Prepare the adapter for reconnection by configuring session resumption.
+   *
+   * Called automatically by `useAutoReconnect` before each retry attempt.
+   * Sets the session resumption handle so the next `connect()` resumes
+   * the previous Gemini Live session instead of starting fresh.
+   */
+  prepareReconnect(): void {
+    if (this.lastSessionHandle) {
+      this.sessionResumption = {
+        handle: this.lastSessionHandle,
+        transparent: true,
+      };
+    }
   }
 
   async connect(options: ConnectOptions, handlers: TransportEventHandlers): Promise<void> {
