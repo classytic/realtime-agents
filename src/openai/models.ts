@@ -31,6 +31,8 @@ export const OPENAI_DEFAULT_MODEL = 'gpt-realtime';
 
 /** Transcription models supported by the Realtime API */
 export const OPENAI_TRANSCRIPTION_MODELS = [
+  'gpt-4o-transcribe-latest',
+  'gpt-4o-transcribe',
   'gpt-4o-mini-transcribe',
 ] as const;
 

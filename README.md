@@ -20,6 +20,8 @@ Build voice-powered AI agents that work with **OpenAI Realtime API** and **Googl
 - **Push-to-talk** -- manual voice activation mode
 - **TypeScript-first** -- full type safety with exported types for all APIs
 
+Native multi-agent handoffs are currently an **OpenAI Agents SDK** capability. Gemini Live can share the same tool and session abstraction in this package, but OpenAI remains the only provider here with built-in agent-to-agent transfer semantics.
+
 ## Install
 
 ```bash
@@ -45,11 +47,27 @@ npm install react zod
 
 ```tsx
 import { useRealtimeSession, tool } from "@classytic/realtime-agents";
-import { OpenAIAdapter } from "@classytic/realtime-agents/openai";
+import {
+  OpenAIAdapter,
+  OPENAI_LOW_LATENCY_SESSION_OPTIONS,
+  OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG,
+  OPENAI_SPEECH_STYLE_HINTS,
+  openAIAgentOptions,
+  openAISessionOptions,
+} from "@classytic/realtime-agents/openai";
 import { z } from "zod";
 
-const adapter = useMemo(() => new OpenAIAdapter(), []);
-// Defaults: WebRTC, opus codec, gpt-realtime, retention_ratio 0.8
+const adapter = useMemo(
+  () =>
+    new OpenAIAdapter({
+      sessionOptions: OPENAI_LOW_LATENCY_SESSION_OPTIONS,
+      transcriptionLanguage: "en",
+      transcriptionModel: OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG.model,
+      transcriptionPrompt: OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG.prompt,
+    }),
+  [],
+);
+// Defaults: WebRTC, gpt-realtime, retention_ratio 0.8, plus low-latency session preset
 
 const session = useRealtimeSession(adapter, {
   onTranscriptComplete: (entry) => console.log(entry.role, entry.text),
@@ -65,10 +83,21 @@ await session.connect({
   },
   agent: {
     name: "assistant",
-    instructions: "You are a helpful assistant.",
+    instructions: `You are a helpful assistant. ${OPENAI_SPEECH_STYLE_HINTS["en-IN"]}`,
     tools: [weatherTool],
     voice: "coral",
+    providerOptions: openAIAgentOptions({
+      prompt: {
+        promptId: "pmpt_123",
+        version: "3",
+        variables: { locale: "en-IN" },
+      },
+    }),
   },
+  providerOptions: openAISessionOptions({
+    ...OPENAI_LOW_LATENCY_SESSION_OPTIONS,
+    workflowName: "interview-session",
+  }),
 });
 
 // Controls
@@ -83,10 +112,18 @@ session.disconnect();
 
 ```tsx
 import { useRealtimeSession } from "@classytic/realtime-agents";
-import { GeminiAdapter } from "@classytic/realtime-agents/gemini";
+import {
+  GeminiAdapter,
+  GEMINI_EN_IN_SPEECH_CONFIG,
+  GEMINI_LOW_LATENCY_SESSION_OPTIONS,
+  geminiSessionOptions,
+} from "@classytic/realtime-agents/gemini";
 
-const adapter = useMemo(() => new GeminiAdapter(), []);
-// Defaults: gemini-2.5-flash, transcription on, sliding window compression
+const adapter = useMemo(
+  () => new GeminiAdapter({ sessionOptions: GEMINI_LOW_LATENCY_SESSION_OPTIONS }),
+  [],
+);
+// Defaults: gemini-2.5-flash-native-audio-preview-12-2025, transcription on, sliding window compression
 
 const session = useRealtimeSession(adapter, {
   /* same callbacks */
@@ -103,6 +140,12 @@ await session.connect({
     tools: [weatherTool],
     voice: "Kore",
   },
+  providerOptions: geminiSessionOptions({
+    speechConfig: GEMINI_EN_IN_SPEECH_CONFIG,
+    explicitVadSignal: true,
+    // Escape hatch for newer Gemini Live config without waiting for a wrapper release
+    config: {},
+  }),
 });
 ```
 
@@ -177,9 +220,12 @@ await session.connect({
     instructions: "You are a helpful assistant.",
     tools: [weatherTool],
     voice: "coral",
-    providerOptions: {
-      /* provider-specific overrides */
-    },
+      providerOptions: openAIAgentOptions({
+        prompt: {
+          promptId: "pmpt_123",
+          variables: { locale: "en-IN" },
+        },
+      }),
   },
 
   // Optional: HTML audio element for playback (WebRTC)
@@ -196,6 +242,12 @@ await session.connect({
     { role: "user", text: "My name is Alice." },
     { role: "assistant", text: "Nice to meet you, Alice!" },
   ],
+
+  // Optional: provider-native session options
+  providerOptions: openAISessionOptions({
+    workflowName: "interview-session",
+    sessionConfig: OPENAI_LOW_LATENCY_SESSION_OPTIONS.sessionConfig,
+  }),
 });
 ```
 
@@ -236,9 +288,43 @@ const session = useRealtimeSession(adapter, {
   onAgentHandoff: (agentName) => {}, // Agent-to-agent handoff
   onUserSpeechStart: () => {}, // User started speaking
   onUserSpeechStop: () => {}, // User stopped speaking
+  onToolStart: (toolName, args) => {}, // Tool invocation started
+  onToolEnd: (toolName, result) => {}, // Tool invocation finished
   onUsageUpdate: (usage) => {}, // Token usage changed
+  onTransportEvent: (event) => {}, // Raw provider transport event
+  onGuardrailTripped: (result) => {}, // Guardrail result (OpenAI)
   onToolApprovalRequest: async (name, args) => true, // Approve/reject tool calls
 });
+```
+
+## Presets And Provider Options
+
+`@classytic/realtime-agents/openai` exports reusable presets and typed helpers:
+
+```ts
+import {
+  OPENAI_DEFAULT_CONTEXT_MANAGEMENT,
+  OPENAI_LOW_LATENCY_CONTEXT_MANAGEMENT,
+  OPENAI_DEFAULT_SESSION_OPTIONS,
+  OPENAI_LOW_LATENCY_SESSION_OPTIONS,
+  OPENAI_DEFAULT_TURN_DETECTION,
+  OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG,
+  OPENAI_SPEECH_STYLE_HINTS,
+  openAIAgentOptions,
+  openAISessionOptions,
+} from "@classytic/realtime-agents/openai";
+```
+
+`@classytic/realtime-agents/gemini` exports equivalent session helpers:
+
+```ts
+import {
+  GEMINI_DEFAULT_CONTEXT_MANAGEMENT,
+  GEMINI_LOW_LATENCY_CONTEXT_MANAGEMENT,
+  GEMINI_DEFAULT_SESSION_OPTIONS,
+  GEMINI_LOW_LATENCY_SESSION_OPTIONS,
+  geminiSessionOptions,
+} from "@classytic/realtime-agents/gemini";
 ```
 
 ## Auto-Reconnect
@@ -333,8 +419,32 @@ new OpenAIAdapter({ contextManagement: { mode: "disabled" } });
 | `codec`              | `'opus'`                                | Audio codec for WebRTC                                               |
 | `model`              | `'gpt-realtime'`                        | OpenAI model identifier                                              |
 | `transcriptionModel` | `'gpt-4o-mini-transcribe'`              | Transcription model                                                  |
+| `transcriptionLanguage` | `undefined`                          | Optional language hint for speech recognition                        |
+| `transcriptionPrompt` | `undefined`                            | Optional jargon/name hint for speech recognition                     |
 | `vadEagerness`       | `'medium'`                              | Voice activity detection: `'low'`, `'medium'`, `'high'`, or `'auto'` |
 | `contextManagement`  | `{ mode: 'auto', retentionRatio: 0.8 }` | Context window management                                            |
+
+### Choosing a Transcription Model
+
+- `gpt-4o-mini-transcribe`: fastest and cheapest. Good default for most voice UX.
+- `gpt-4o-transcribe`: slower than mini but more accurate. Better for interviews, accents, names, and technical jargon.
+- `gpt-4o-transcribe-latest`: use when you want OpenAI's latest transcribe alias instead of a pinned choice.
+
+Example:
+
+```ts
+import {
+  OpenAIAdapter,
+  OPENAI_HIGH_ACCURACY_SESSION_OPTIONS,
+  OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG,
+} from "@classytic/realtime-agents/openai";
+
+const adapter = new OpenAIAdapter({
+  sessionOptions: OPENAI_HIGH_ACCURACY_SESSION_OPTIONS,
+  transcriptionModel: OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG.model,
+  transcriptionPrompt: OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG.prompt,
+});
+```
 
 ### GeminiAdapter
 
@@ -368,10 +478,24 @@ const analyser = adapter.getOutputAnalyser(); // AnalyserNode | null
 const { usage } = session;
 console.log(usage?.inputTokens, usage?.outputTokens, usage?.totalTokens);
 // Granular breakdown: usage?.inputTokensDetails, usage?.outputTokensDetails
+// OpenAI also exposes usage?.requests when available
+// Advanced analytics: usage?.rawUsage contains the provider-native payload
 
 // Snapshot (e.g., before disconnect)
 const snapshot = session.getUsage();
 ```
+
+`UsageInfo` is the unified token accounting shape across providers:
+
+- `inputTokens`
+- `outputTokens`
+- `totalTokens`
+- `requests?`
+- `inputTokensDetails?`
+- `outputTokensDetails?`
+- `rawUsage?`
+
+OpenAI currently provides the richest usage detail. Gemini Live currently provides reliable top-level token counts and exposes the provider payload through `rawUsage`.
 
 ## API Reference
 
@@ -408,6 +532,12 @@ import {
   OPENAI_DEFAULT_MODEL,
   OPENAI_TRANSCRIPTION_MODELS,
   OPENAI_DEFAULT_TRANSCRIPTION_MODEL,
+  OPENAI_DEFAULT_TRANSCRIPTION_CONFIG,
+  OPENAI_HIGH_ACCURACY_TRANSCRIPTION_CONFIG,
+  OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG,
+  OPENAI_DEFAULT_SESSION_OPTIONS,
+  OPENAI_HIGH_ACCURACY_SESSION_OPTIONS,
+  OPENAI_LOW_LATENCY_SESSION_OPTIONS,
   OPENAI_TRANSPORTS,
   OPENAI_DEFAULT_TRANSPORT,
 } from "@classytic/realtime-agents/openai";

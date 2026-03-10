@@ -1,6 +1,6 @@
 {
   "name": "@classytic/realtime-agents",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Provider-agnostic realtime voice agent orchestration for React (OpenAI Realtime, Gemini Live)",
   "type": "module",
   "sideEffects": false,
@@ -38,10 +38,10 @@
     "zod-to-json-schema": "^3.24.0"
   },
   "peerDependencies": {
+    "@google/genai": ">=1.44.0",
+    "@openai/agents": ">=0.6.0",
     "react": ">=19.0.0",
-    "zod": ">=4.0.0",
-    "@openai/agents": ">=0.4.0",
-    "@google/genai": ">=1.0.0"
+    "zod": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@openai/agents": {
@@ -52,8 +52,8 @@
     }
   },
   "devDependencies": {
-    "@google/genai": "^1.38.0",
-    "@openai/agents": "^0.4.6",
+    "@google/genai": "^1.44.0",
+    "@openai/agents": "^0.6.0",
     "@types/react": "^19.0.0",
     "publint": "^0.3.17",
     "react": "^19.0.0",

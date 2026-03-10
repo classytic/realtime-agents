@@ -8,6 +8,7 @@ export default defineConfig({
   },
   format: ['esm'],
   platform: 'neutral',
+  sourcemap: false,
   dts: false,
   clean: true,
   exports: false,

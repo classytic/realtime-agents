@@ -15,6 +15,7 @@ export type {
   TranscriptEntry,
   AgentTool,
   AgentConfig,
+  ProviderOptionsMap,
   HistoryEntry,
   ConnectOptions,
   TransportEventHandlers,

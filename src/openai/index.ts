@@ -18,7 +18,29 @@
 export { OpenAIAdapter } from './adapter.js';
 export { OPENAI_VOICES, OPENAI_DEFAULT_VOICE } from './voices.js';
 export type { OpenAIVoiceOption, OpenAIVoiceId } from './voices.js';
-export type { OpenAIAdapterOptions } from './types.js';
+export {
+  OPENAI_DEFAULT_CONTEXT_MANAGEMENT,
+  OPENAI_LOW_LATENCY_CONTEXT_MANAGEMENT,
+  OPENAI_DEFAULT_TRANSCRIPTION_CONFIG,
+  OPENAI_HIGH_ACCURACY_TRANSCRIPTION_CONFIG,
+  OPENAI_INTERVIEW_TRANSCRIPTION_CONFIG,
+  OPENAI_DEFAULT_TURN_DETECTION,
+  OPENAI_LOW_LATENCY_TURN_DETECTION,
+  OPENAI_DEFAULT_SESSION_OPTIONS,
+  OPENAI_HIGH_ACCURACY_SESSION_OPTIONS,
+  OPENAI_LOW_LATENCY_SESSION_OPTIONS,
+  OPENAI_SPEECH_STYLE_HINTS,
+} from './config.js';
+export {
+  openAIAgentOptions,
+  openAISessionOptions,
+} from './types.js';
+export type {
+  OpenAIAdapterOptions,
+  OpenAIAgentProviderOptions,
+  OpenAISessionProviderOptions,
+  OpenAIRealtimePromptDefinition,
+} from './types.js';
 export {
   OPENAI_REALTIME_MODELS,
   OPENAI_DEFAULT_MODEL,

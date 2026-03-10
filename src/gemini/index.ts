@@ -14,7 +14,31 @@
 export { GeminiAdapter } from './adapter.js';
 export { GEMINI_VOICES, GEMINI_DEFAULT_VOICE } from './voices.js';
 export type { GeminiVoiceOption, GeminiVoiceId } from './voices.js';
-export type { GeminiAdapterOptions } from './types.js';
+export {
+  GEMINI_DEFAULT_CONTEXT_MANAGEMENT,
+  GEMINI_LOW_LATENCY_CONTEXT_MANAGEMENT,
+  GEMINI_DEFAULT_AUDIO_TRANSCRIPTION_CONFIG,
+  GEMINI_DEFAULT_SPEECH_CONFIG,
+  GEMINI_EN_IN_SPEECH_CONFIG,
+  GEMINI_HI_IN_SPEECH_CONFIG,
+  GEMINI_BN_BD_SPEECH_CONFIG,
+  GEMINI_DEFAULT_SESSION_OPTIONS,
+  GEMINI_LOW_LATENCY_SESSION_OPTIONS,
+} from './config.js';
+export { geminiSessionOptions } from './types.js';
+export type {
+  GeminiAdapterOptions,
+  GeminiSessionProviderOptions,
+  GeminiLiveAudioTranscriptionConfig,
+  GeminiLiveContextWindowCompression,
+  GeminiLiveProactivityConfig,
+  GeminiLiveRealtimeInputConfig,
+  GeminiLiveResponseModalities,
+  GeminiLiveSessionResumption,
+  GeminiLiveSpeechConfig,
+  GeminiLiveThinkingConfig,
+  GeminiLiveToolList,
+} from './types.js';
 export {
   GEMINI_LIVE_MODELS,
   GEMINI_DEFAULT_MODEL,

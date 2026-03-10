@@ -7,6 +7,7 @@
 import { RealtimeAgent, tool as openaiTool } from '@openai/agents/realtime';
 import type { AgentConfig } from '../types.js';
 import { OPENAI_DEFAULT_VOICE } from './voices.js';
+import type { OpenAIAgentProviderOptions } from './types.js';
 
 /**
  * Build an OpenAI `RealtimeAgent` from a provider-agnostic `AgentConfig`.
@@ -24,10 +25,16 @@ export function buildRealtimeAgent(config: AgentConfig): RealtimeAgent {
     }),
   );
 
+  const openaiOptions = config.providerOptions?.openai as
+    | OpenAIAgentProviderOptions
+    | undefined;
+
   return new RealtimeAgent({
     name: config.name,
     instructions: config.instructions,
     tools: nativeTools,
     voice: config.voice ?? OPENAI_DEFAULT_VOICE,
+    prompt: openaiOptions?.prompt,
+    handoffDescription: openaiOptions?.handoffDescription,
   });
 }

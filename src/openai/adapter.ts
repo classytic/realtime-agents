@@ -12,20 +12,108 @@ import {
   RealtimeSession,
   OpenAIRealtimeWebRTC,
   OpenAIRealtimeWebSocket,
+  type RealtimeSessionConfig,
 } from "@openai/agents/realtime";
 import type {
   RealtimeAdapter,
   ConnectOptions,
   TransportEventHandlers,
+  UsageInfo,
 } from "../types.js";
 import { float32ToPcm16, decodeAudioData } from "../audio/pcm-utils.js";
 import { getAudioWorkletUrl } from "../audio/worklet.js";
 import { applyCodecPreferences, audioFormatForCodec } from "./codec-utils.js";
 import { buildRealtimeAgent } from "./map-tools.js";
-import type { OpenAIAdapterOptions } from "./types.js";
+import type {
+  OpenAIAdapterOptions,
+  OpenAISessionProviderOptions,
+} from "./types.js";
 
 /** Default sample rate for OpenAI Realtime PCM16 audio */
 const OPENAI_SAMPLE_RATE = 24000;
+
+function mergeOpenAISessionConfig(
+  ...configs: Array<Partial<RealtimeSessionConfig> | undefined>
+): Partial<RealtimeSessionConfig> {
+  let merged: Partial<RealtimeSessionConfig> = {};
+
+  for (const config of configs) {
+    if (!config) continue;
+
+    const previousAudio = (
+      merged as {
+        audio?: {
+          input?: Record<string, unknown>;
+          output?: Record<string, unknown>;
+        };
+      }
+    ).audio;
+    const nextAudio = (
+      config as {
+        audio?: {
+          input?: Record<string, unknown>;
+          output?: Record<string, unknown>;
+        };
+      }
+    ).audio;
+
+    merged = {
+      ...merged,
+      ...config,
+      providerData: {
+        ...(merged.providerData ?? {}),
+        ...(config.providerData ?? {}),
+      },
+      audio:
+        previousAudio || nextAudio
+          ? {
+            ...(previousAudio ?? {}),
+            ...(nextAudio ?? {}),
+            input:
+              previousAudio?.input || nextAudio?.input
+                ? {
+                  ...(previousAudio?.input ?? {}),
+                  ...(nextAudio?.input ?? {}),
+                }
+                : undefined,
+            output:
+              previousAudio?.output || nextAudio?.output
+                ? {
+                  ...(previousAudio?.output ?? {}),
+                  ...(nextAudio?.output ?? {}),
+                }
+                : undefined,
+          }
+          : undefined,
+    };
+  }
+
+  return merged;
+}
+
+function mergeOpenAISessionOptions(
+  base: OpenAISessionProviderOptions | undefined,
+  override: OpenAISessionProviderOptions | undefined,
+): OpenAISessionProviderOptions {
+  const traceMetadata = {
+    ...(base?.traceMetadata ?? {}),
+    ...(override?.traceMetadata ?? {}),
+  };
+
+  return {
+    ...base,
+    ...override,
+    sessionConfig: mergeOpenAISessionConfig(
+      base?.sessionConfig,
+      override?.sessionConfig,
+    ),
+    outputGuardrails: override?.outputGuardrails ?? base?.outputGuardrails,
+    outputGuardrailSettings:
+      override?.outputGuardrailSettings ?? base?.outputGuardrailSettings,
+    traceMetadata:
+      Object.keys(traceMetadata).length > 0 ? traceMetadata : undefined,
+  };
+}
 
 export class OpenAIAdapter implements RealtimeAdapter {
   readonly providerName = "openai";
@@ -34,13 +122,16 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private handlers: TransportEventHandlers | null = null;
   private activeResponseRef = false;
   private audioPlayingRef = false;
-  private usageSnapshot: Record<string, unknown> | null = null;
+  private usageSnapshot: UsageInfo | null = null;
 
   private readonly transport: "webrtc" | "websocket";
   private readonly codec: string;
   private readonly model: string;
   private readonly transcriptionModel: string;
+  private readonly transcriptionLanguage?: string;
+  private readonly transcriptionPrompt?: string;
   private readonly vadEagerness: string;
+  private readonly sessionOptions?: OpenAISessionProviderOptions;
   private readonly contextManagement: {
     mode: "auto" | "disabled";
     retentionRatio?: number;
@@ -59,6 +150,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private wsWorkletNode: AudioWorkletNode | null = null;
   private wsInputSource: MediaStreamAudioSourceNode | null = null;
   private wsMediaStream: MediaStream | null = null;
+  private wsOwnsMediaStream = false;
   private wsAnalyser: AnalyserNode | null = null;
   private wsActiveSources: Set<AudioBufferSourceNode> = new Set();
   private wsNextStartTime = 0;
@@ -69,7 +161,10 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.model = options.model ?? "gpt-realtime";
     this.transcriptionModel =
       options.transcriptionModel ?? "gpt-4o-mini-transcribe";
+    this.transcriptionLanguage = options.transcriptionLanguage;
+    this.transcriptionPrompt = options.transcriptionPrompt;
     this.vadEagerness = options.vadEagerness ?? "medium";
+    this.sessionOptions = options.sessionOptions;
     this.contextManagement = {
       mode: options.contextManagement?.mode ?? "auto",
       retentionRatio: options.contextManagement?.retentionRatio ?? 0.8,
@@ -82,7 +177,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
    * - mode 'auto' (default): `retention_ratio` at 0.8 — optimizes prompt caching
    * - mode 'disabled': `truncation: { type: 'disabled' }` — errors at 28k tokens
    */
-  private buildTruncationProviderData(): Record<string, unknown> {
+  private buildTruncationConfig(): Partial<RealtimeSessionConfig> {
     if (this.contextManagement.mode === "disabled") {
       return { providerData: { truncation: { type: "disabled" } } };
     }
@@ -118,6 +213,10 @@ export class OpenAIAdapter implements RealtimeAdapter {
     const agent = buildRealtimeAgent(options.agent);
     const audioFormat = audioFormatForCodec(this.codec);
     const ephemeralKey = await options.getCredentials();
+    const openaiSessionOptions = mergeOpenAISessionOptions(
+      this.sessionOptions,
+      options.providerOptions?.openai as OpenAISessionProviderOptions | undefined,
+    );
 
     const transportLayer =
       this.transport === "websocket"
@@ -134,21 +233,49 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.session = new RealtimeSession(agent, {
       transport: transportLayer,
       model: this.model,
-      config: {
-        inputAudioFormat: audioFormat,
-        outputAudioFormat: audioFormat,
-        inputAudioTranscription: {
-          model: this.transcriptionModel,
+      config: mergeOpenAISessionConfig({
+        outputModalities: ["audio"],
+        audio: {
+          input: {
+            format: audioFormat,
+            transcription: {
+              model: this.transcriptionModel,
+              ...(this.transcriptionLanguage
+                ? { language: this.transcriptionLanguage }
+                : {}),
+              ...(this.transcriptionPrompt
+                ? { prompt: this.transcriptionPrompt }
+                : {}),
+            },
+            turnDetection: {
+              type: "semantic_vad",
+              eagerness: this.vadEagerness as
+                | "low"
+                | "medium"
+                | "high"
+                | "auto",
+              createResponse: true,
+              interruptResponse: true,
+            },
+          },
+          output: {
+            format: audioFormat,
+            speed: 1,
+          },
         },
-        turnDetection: {
-          type: "semantic_vad",
-          eagerness: this.vadEagerness as "low" | "medium" | "high" | "auto",
-          createResponse: true,
-          interruptResponse: true,
-        },
-        ...this.buildTruncationProviderData(),
-      },
+        ...this.buildTruncationConfig(),
+      }, openaiSessionOptions.sessionConfig),
       context: options.context ?? {},
+      outputGuardrails: openaiSessionOptions.outputGuardrails as any,
+      outputGuardrailSettings: openaiSessionOptions.outputGuardrailSettings as any,
+      historyStoreAudio: openaiSessionOptions.historyStoreAudio,
+      tracingDisabled: openaiSessionOptions.tracingDisabled,
+      workflowName: openaiSessionOptions.workflowName,
+      groupId: openaiSessionOptions.groupId,
+      traceMetadata: openaiSessionOptions.traceMetadata as any,
+      automaticallyTriggerResponseForMcpToolCalls:
+        openaiSessionOptions.automaticallyTriggerResponseForMcpToolCalls,
+      toolErrorFormatter: openaiSessionOptions.toolErrorFormatter as any,
     });
 
     this.wireSessionEvents();
@@ -194,14 +321,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
       try {
         const usage = this.session.usage;
         if (usage) {
-          this.usageSnapshot = {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            totalTokens: usage.totalTokens,
-            requests: usage.requests,
-            inputTokensDetails: usage.inputTokensDetails,
-            outputTokensDetails: usage.outputTokensDetails,
-          };
+          this.usageSnapshot = this.mapUsage(usage);
         }
       } catch {
         /* usage not available */
@@ -309,19 +429,12 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
   }
 
-  getUsage(): Record<string, unknown> | null {
+  getUsage(): UsageInfo | null {
     if (this.session) {
       try {
         const usage = this.session.usage;
         if (usage) {
-          return {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            totalTokens: usage.totalTokens,
-            requests: usage.requests,
-            inputTokensDetails: usage.inputTokensDetails,
-            outputTokensDetails: usage.outputTokensDetails,
-          };
+          return this.mapUsage(usage);
         }
       } catch {
         /* fall through */
@@ -417,9 +530,15 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
 
     try {
-      this.wsMediaStream =
-        externalStream ??
-        (await navigator.mediaDevices.getUserMedia({ audio: true }));
+      if (externalStream) {
+        this.wsMediaStream = externalStream;
+        this.wsOwnsMediaStream = false;
+      } else {
+        this.wsMediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        this.wsOwnsMediaStream = true;
+      }
     } catch (e) {
       this.handlers?.onError(
         e instanceof Error ? e : new Error("Microphone access denied"),
@@ -514,10 +633,11 @@ export class OpenAIAdapter implements RealtimeAdapter {
       this.wsOutputCtx = null;
     }
     this.wsAnalyser = null;
-    if (this.wsMediaStream) {
+    if (this.wsMediaStream && this.wsOwnsMediaStream) {
       this.wsMediaStream.getTracks().forEach((track) => track.stop());
-      this.wsMediaStream = null;
     }
+    this.wsMediaStream = null;
+    this.wsOwnsMediaStream = false;
   }
 
   // ── Internal: wire OpenAI SDK events to TransportEventHandlers ──
@@ -695,17 +815,30 @@ export class OpenAIAdapter implements RealtimeAdapter {
     try {
       const usage = this.session.usage;
       if (usage) {
-        this.handlers.onUsageUpdate({
-          inputTokens: usage.inputTokens ?? 0,
-          outputTokens: usage.outputTokens ?? 0,
-          totalTokens: usage.totalTokens ?? 0,
-          inputTokensDetails: this.flattenDetails(usage.inputTokensDetails),
-          outputTokensDetails: this.flattenDetails(usage.outputTokensDetails),
-        });
+        this.handlers.onUsageUpdate(this.mapUsage(usage));
       }
     } catch {
       /* usage not available */
     }
+  }
+
+  private mapUsage(usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    requests?: number;
+    inputTokensDetails?: Record<string, unknown> | Record<string, unknown>[];
+    outputTokensDetails?: Record<string, unknown> | Record<string, unknown>[];
+  }): UsageInfo {
+    return {
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      totalTokens: usage.totalTokens ?? 0,
+      requests: usage.requests,
+      inputTokensDetails: this.flattenDetails(usage.inputTokensDetails),
+      outputTokensDetails: this.flattenDetails(usage.outputTokensDetails),
+      rawUsage: usage,
+    };
   }
 
   /** Flatten token detail arrays/objects into a single Record<string, number> for UsageInfo */

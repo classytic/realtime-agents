@@ -75,6 +75,7 @@ export function useRealtimeSession(
   const connect = useCallback(
     async (options: ConnectOptions) => {
       updateStatus('connecting');
+      savedTranscriptIds.current.clear();
 
       try {
         const handlers: TransportEventHandlers = {
@@ -92,6 +93,7 @@ export function useRealtimeSession(
           },
           onAgentHandoff: callbacks.onAgentHandoff,
           onToolStart: (toolName, args) => {
+            callbacks.onToolStart?.(toolName, args);
             historyHandlers.handleAgentToolStart(
               {},
               null,
@@ -99,6 +101,7 @@ export function useRealtimeSession(
             );
           },
           onToolEnd: (toolName, result) => {
+            callbacks.onToolEnd?.(toolName, result);
             historyHandlers.handleAgentToolEnd(
               {},
               null,
@@ -109,6 +112,7 @@ export function useRealtimeSession(
           onUserSpeechStart: callbacks.onUserSpeechStart,
           onUserSpeechStop: callbacks.onUserSpeechStop,
           onTransportEvent: (event) => {
+            callbacks.onTransportEvent?.(event);
             // Handle transcript events from transport
             if (event.type === 'conversation.item.input_audio_transcription.completed') {
               historyHandlers.handleTranscriptionCompleted(event);
@@ -170,6 +174,7 @@ export function useRealtimeSession(
             }
           },
           onGuardrailTripped: (result) => {
+            callbacks.onGuardrailTripped?.(result);
             historyHandlers.handleGuardrailTripped(
               {},
               null,
@@ -247,7 +252,7 @@ export function useRealtimeSession(
     adapterRef.current.sendSimulatedUserMessage(text);
   }, []);
 
-  const getUsage = useCallback((): Record<string, unknown> | null => {
+  const getUsage = useCallback((): UsageInfo | null => {
     return adapterRef.current.getUsage();
   }, []);
 

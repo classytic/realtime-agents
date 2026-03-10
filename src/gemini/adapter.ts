@@ -8,6 +8,7 @@
 
 import { GoogleGenAI, Modality } from '@google/genai';
 import type { LiveServerMessage } from '@google/genai';
+import type { LiveConnectConfig } from '@google/genai';
 import type {
   RealtimeAdapter,
   ConnectOptions,
@@ -20,7 +21,11 @@ import { createPcmBlob, base64ToUint8Array, decodeAudioData } from '../audio/pcm
 import { getAudioWorkletUrl } from '../audio/worklet.js';
 import { mapToolsToFunctionDeclarations } from './map-tools.js';
 import { GEMINI_DEFAULT_VOICE } from './voices.js';
-import type { GeminiAdapterOptions } from './types.js';
+import type {
+  GeminiAdapterOptions,
+  GeminiLiveToolList,
+  GeminiSessionProviderOptions,
+} from './types.js';
 
 export class GeminiAdapter implements RealtimeAdapter {
   readonly providerName = 'gemini';
@@ -70,6 +75,7 @@ export class GeminiAdapter implements RealtimeAdapter {
   private readonly videoFrameInterval: number;
   private sessionResumption?: { handle?: string; transparent?: boolean };
   private readonly contextManagement: { mode: 'auto' | 'disabled'; triggerTokens?: number; retentionRatio?: number };
+  private readonly sessionOptions?: GeminiSessionProviderOptions;
 
   /** Latest session resumption handle received from the server */
   private lastSessionHandle: string | null = null;
@@ -87,6 +93,7 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.enableVideo = options.enableVideo ?? false;
     this.videoFrameInterval = options.videoFrameInterval ?? 5000;
     this.sessionResumption = options.sessionResumption;
+    this.sessionOptions = options.sessionOptions;
     this.contextManagement = {
       mode: options.contextManagement?.mode ?? 'auto',
       triggerTokens: options.contextManagement?.triggerTokens,
@@ -153,6 +160,10 @@ export class GeminiAdapter implements RealtimeAdapter {
 
     const apiKey = await options.getCredentials();
     const ai = new GoogleGenAI({ apiKey });
+    const geminiSessionOptions = this.mergeGeminiSessionOptions(
+      this.sessionOptions,
+      options.providerOptions?.gemini as GeminiSessionProviderOptions | undefined,
+    );
 
     // Map tools
     this.activeTools.clear();
@@ -161,6 +172,12 @@ export class GeminiAdapter implements RealtimeAdapter {
     }
 
     const functionDeclarations = mapToolsToFunctionDeclarations(options.agent.tools);
+    const sessionConfig = this.buildSessionConfig(
+      geminiSessionOptions,
+      functionDeclarations,
+      options.agent.instructions,
+      options.agent.voice,
+    );
 
     // Audio contexts
     this.inputAudioContext = new AudioContext({ sampleRate: this.inputSampleRate });
@@ -173,25 +190,7 @@ export class GeminiAdapter implements RealtimeAdapter {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sessionPromise: any = ai.live.connect({
         model: this.model,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          ...(this.enableInputTranscription ? { inputAudioTranscription: {} } : {}),
-          ...(this.enableOutputTranscription ? { outputAudioTranscription: {} } : {}),
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: options.agent.voice ?? GEMINI_DEFAULT_VOICE,
-              },
-            },
-          },
-          tools:
-            functionDeclarations.length > 0
-              ? [{ functionDeclarations }]
-              : undefined,
-          systemInstruction: options.agent.instructions,
-          ...(this.sessionResumption ? { sessionResumption: this.sessionResumption } : {}),
-          ...this.buildCompressionConfig(),
-        },
+        config: sessionConfig,
         callbacks: {
           onopen: () => {
             handlers.onStatusChange('connected');
@@ -301,7 +300,7 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.sendMessage(text);
   }
 
-  getUsage(): Record<string, unknown> | null {
+  getUsage(): UsageInfo | null {
     if (this.usageData.totalTokens === 0) return null;
     return { ...this.usageData };
   }
@@ -399,6 +398,116 @@ export class GeminiAdapter implements RealtimeAdapter {
         slidingWindow,
       },
     };
+  }
+
+  private mergeGeminiSessionOptions(
+    base: GeminiSessionProviderOptions | undefined,
+    override: GeminiSessionProviderOptions | undefined,
+  ): GeminiSessionProviderOptions {
+    return {
+      ...(base ?? {}),
+      ...(override ?? {}),
+      config: {
+        ...(base?.config ?? {}),
+        ...(override?.config ?? {}),
+      },
+    };
+  }
+
+  private buildSessionConfig(
+    sessionOptions: GeminiSessionProviderOptions,
+    functionDeclarations: ReturnType<typeof mapToolsToFunctionDeclarations>,
+    instructions: string,
+    voice: string | undefined,
+  ): LiveConnectConfig {
+    const rawConfig = sessionOptions.config ?? {};
+    const defaultSpeechConfig = {
+      voiceConfig: {
+        prebuiltVoiceConfig: {
+          voiceName: voice ?? GEMINI_DEFAULT_VOICE,
+        },
+      },
+    } satisfies NonNullable<LiveConnectConfig['speechConfig']>;
+
+    return {
+      ...rawConfig,
+      responseModalities:
+        sessionOptions.responseModalities ??
+        rawConfig.responseModalities ??
+        [Modality.AUDIO],
+      speechConfig: {
+        ...defaultSpeechConfig,
+        ...(rawConfig.speechConfig ?? {}),
+        ...(sessionOptions.speechConfig ?? {}),
+      },
+      tools: this.mergeTools(
+        rawConfig.tools,
+        sessionOptions.tools,
+        functionDeclarations,
+      ),
+      systemInstruction: instructions,
+      temperature: sessionOptions.temperature ?? rawConfig.temperature,
+      topP: sessionOptions.topP ?? rawConfig.topP,
+      topK: sessionOptions.topK ?? rawConfig.topK,
+      maxOutputTokens: sessionOptions.maxOutputTokens ?? rawConfig.maxOutputTokens,
+      mediaResolution: sessionOptions.mediaResolution ?? rawConfig.mediaResolution,
+      seed: sessionOptions.seed ?? rawConfig.seed,
+      thinkingConfig: sessionOptions.thinkingConfig ?? rawConfig.thinkingConfig,
+      enableAffectiveDialog:
+        sessionOptions.enableAffectiveDialog ?? rawConfig.enableAffectiveDialog,
+      proactivity: sessionOptions.proactivity ?? rawConfig.proactivity,
+      explicitVadSignal:
+        sessionOptions.explicitVadSignal ?? rawConfig.explicitVadSignal,
+      realtimeInputConfig:
+        sessionOptions.realtimeInputConfig ?? rawConfig.realtimeInputConfig,
+      sessionResumption:
+        sessionOptions.sessionResumption ??
+        rawConfig.sessionResumption ??
+        this.sessionResumption,
+      contextWindowCompression:
+        sessionOptions.contextWindowCompression ??
+        rawConfig.contextWindowCompression ??
+        (this.buildCompressionConfig().contextWindowCompression as
+          LiveConnectConfig['contextWindowCompression']),
+      inputAudioTranscription: this.resolveTranscriptionConfig(
+        sessionOptions.inputAudioTranscription,
+        rawConfig.inputAudioTranscription,
+        this.enableInputTranscription,
+      ),
+      outputAudioTranscription: this.resolveTranscriptionConfig(
+        sessionOptions.outputAudioTranscription,
+        rawConfig.outputAudioTranscription,
+        this.enableOutputTranscription,
+      ),
+    };
+  }
+
+  private mergeTools(
+    rawTools: LiveConnectConfig['tools'] | undefined,
+    typedTools: GeminiLiveToolList | undefined,
+    functionDeclarations: ReturnType<typeof mapToolsToFunctionDeclarations>,
+  ): LiveConnectConfig['tools'] | undefined {
+    const mergedTools = [
+      ...(Array.isArray(rawTools) ? rawTools : []),
+      ...(Array.isArray(typedTools) ? typedTools : []),
+    ];
+
+    if (functionDeclarations.length > 0) {
+      mergedTools.push({ functionDeclarations });
+    }
+
+    return mergedTools.length > 0 ? mergedTools : undefined;
+  }
+
+  private resolveTranscriptionConfig(
+    preferred: GeminiSessionProviderOptions['inputAudioTranscription'] | undefined,
+    fallback: LiveConnectConfig['inputAudioTranscription'] | undefined,
+    enabledByAdapter: boolean,
+  ): LiveConnectConfig['inputAudioTranscription'] | undefined {
+    if (preferred === false) return undefined;
+    if (preferred) return preferred;
+    if (fallback) return fallback;
+    return enabledByAdapter ? {} : undefined;
   }
 
   /**
@@ -531,6 +640,7 @@ export class GeminiAdapter implements RealtimeAdapter {
         inputTokens: typeof usage.promptTokenCount === 'number' ? usage.promptTokenCount : this.usageData.inputTokens,
         outputTokens: typeof usage.responseTokenCount === 'number' ? usage.responseTokenCount : this.usageData.outputTokens,
         totalTokens: typeof usage.totalTokenCount === 'number' ? usage.totalTokenCount : this.usageData.totalTokens,
+        rawUsage: usage,
       };
       this.usageData = updated;
       this.handlers?.onUsageUpdate?.(updated);

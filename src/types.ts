@@ -39,17 +39,26 @@ export interface AgentConfig {
   readonly instructions: string;
   readonly tools: readonly AgentTool[];
   readonly voice?: string;
-  readonly providerOptions?: Readonly<Record<string, unknown>>;
+  readonly providerOptions?: ProviderOptionsMap;
+}
+
+export interface ProviderOptionsMap {
+  readonly openai?: Readonly<Record<string, unknown>>;
+  readonly gemini?: Readonly<Record<string, unknown>>;
 }
 
 export interface UsageInfo {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly totalTokens: number;
+  /** Total provider request count when the backend exposes it. */
+  readonly requests?: number;
   /** Granular breakdown of input tokens (e.g. cached_tokens, audio_tokens) for pricing */
   readonly inputTokensDetails?: Readonly<Record<string, number>>;
   /** Granular breakdown of output tokens (e.g. audio_tokens) for pricing */
   readonly outputTokensDetails?: Readonly<Record<string, number>>;
+  /** Raw provider-native usage payload for advanced analytics or billing reconciliation. */
+  readonly rawUsage?: unknown;
 }
 
 /**
@@ -124,6 +133,8 @@ export interface ConnectOptions {
    * - **Gemini**: Sends turns via `sendClientContent` to prime the model context.
    */
   readonly history?: readonly HistoryEntry[];
+  /** Provider-specific session overrides such as OpenAI guardrails or Gemini live config. */
+  readonly providerOptions?: ProviderOptionsMap;
 }
 
 // ── Event Handlers ──
@@ -190,7 +201,7 @@ export interface RealtimeAdapter {
   pushToTalkStop(): void;
   sendRawEvent(event: unknown): void;
   sendSimulatedUserMessage(text: string): void;
-  getUsage(): Record<string, unknown> | null;
+  getUsage(): UsageInfo | null;
   readonly providerName: string;
 
   /**
@@ -215,10 +226,14 @@ export interface SessionCallbacks {
   readonly onError?: (error: Error | string) => void;
   readonly onAgentHandoff?: (agentName: string) => void;
   readonly onToolApprovalRequest?: (toolName: string, args: unknown) => Promise<boolean>;
+  readonly onToolStart?: (toolName: string, args: unknown) => void;
+  readonly onToolEnd?: (toolName: string, result: unknown) => void;
   readonly onTranscriptComplete?: (entry: TranscriptEntry) => void;
   readonly onUserSpeechStart?: () => void;
   readonly onUserSpeechStop?: () => void;
   readonly onUsageUpdate?: (usage: UsageInfo) => void;
+  readonly onTransportEvent?: (event: Readonly<{ type: string; [key: string]: unknown }>) => void;
+  readonly onGuardrailTripped?: (result: unknown) => void;
 }
 
 // ── Hook Return Type ──
@@ -236,7 +251,7 @@ export interface UseRealtimeSessionReturn {
   readonly pushToTalkStop: () => void;
   readonly sendEvent: (event: unknown) => void;
   readonly sendSimulatedUserMessage: (text: string) => void;
-  readonly getUsage: () => Record<string, unknown> | null;
+  readonly getUsage: () => UsageInfo | null;
   /** Reactive usage state — updates in real-time as tokens are consumed */
   readonly usage: UsageInfo | null;
 }
