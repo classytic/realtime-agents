@@ -21,7 +21,18 @@ export function buildRealtimeAgent(config: AgentConfig): RealtimeAgent {
       name: t.name,
       description: t.description,
       parameters: t.parameters as any,
-      execute: t.execute,
+      // Wrap execute with a safety net so that uncaught errors always return
+      // an error string to the model instead of propagating and leaving the
+      // AI hanging (the OpenAI SDK does not send function_call_output on throw).
+      execute: async (args: any) => {
+        try {
+          return await t.execute(args);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(`[realtime-agents] Tool "${t.name}" threw:`, msg);
+          return { success: false, message: `Tool error: ${msg}` };
+        }
+      },
     }),
   );
 

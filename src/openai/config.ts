@@ -38,6 +38,13 @@ export const OPENAI_DEFAULT_TURN_DETECTION = Object.freeze({
   interruptResponse: true,
 });
 
+export const OPENAI_INTERVIEW_TURN_DETECTION = Object.freeze({
+  type: 'semantic_vad',
+  eagerness: 'medium',
+  createResponse: true,
+  interruptResponse: true,
+});
+
 export const OPENAI_LOW_LATENCY_TURN_DETECTION = Object.freeze({
   type: 'semantic_vad',
   eagerness: 'high',

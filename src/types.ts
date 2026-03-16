@@ -180,6 +180,12 @@ export interface ReconnectConfig {
    * resumption preserves full context server-side.
    */
   readonly injectHistory?: boolean;
+  /**
+   * Ref to the current MediaStream — read at reconnect time so the
+   * reconnected session uses the latest mic stream (which may have been
+   * hot-swapped via `replaceAudioTrack`).
+   */
+  readonly mediaStreamRef?: Readonly<{ current: MediaStream | null }>;
 }
 
 // ── Adapter Interface ──
@@ -203,6 +209,22 @@ export interface RealtimeAdapter {
   sendSimulatedUserMessage(text: string): void;
   getUsage(): UsageInfo | null;
   readonly providerName: string;
+
+  /**
+   * Update the session configuration mid-session.
+   * Supported fields vary by provider — turn detection, noise reduction, tools, instructions.
+   * Voice and model cannot be changed after the session starts.
+   */
+  updateSessionConfig?(config: Record<string, unknown>): void;
+
+  /**
+   * Hot-swap the audio input track on an active session.
+   *
+   * - **OpenAI (WebRTC)**: Replaces the audio track on the RTCPeerConnection sender.
+   * - **OpenAI (WebSocket)**: Reconnects the AudioWorklet input source.
+   * - **Gemini**: Reconnects the AudioWorklet input source.
+   */
+  replaceAudioTrack?(newStream: MediaStream): Promise<void>;
 
   /**
    * Optional: prepare the adapter for reconnection.
@@ -252,6 +274,10 @@ export interface UseRealtimeSessionReturn {
   readonly sendEvent: (event: unknown) => void;
   readonly sendSimulatedUserMessage: (text: string) => void;
   readonly getUsage: () => UsageInfo | null;
+  /** Update session config mid-session (turn detection, noise reduction, etc.) */
+  readonly updateSessionConfig: (config: Record<string, unknown>) => void;
+  /** Hot-swap the audio input track on an active session */
+  readonly replaceAudioTrack: (newStream: MediaStream) => Promise<void>;
   /** Reactive usage state — updates in real-time as tokens are consumed */
   readonly usage: UsageInfo | null;
 }

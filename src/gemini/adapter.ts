@@ -300,6 +300,14 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.sendMessage(text);
   }
 
+  updateSessionConfig(_config: Record<string, unknown>): void {
+    console.warn("[GeminiAdapter] updateSessionConfig is not supported for Gemini sessions");
+  }
+
+  async replaceAudioTrack(_newStream: MediaStream): Promise<void> {
+    console.warn("[GeminiAdapter] replaceAudioTrack is not yet supported for Gemini sessions");
+  }
+
   getUsage(): UsageInfo | null {
     if (this.usageData.totalTokens === 0) return null;
     return { ...this.usageData };

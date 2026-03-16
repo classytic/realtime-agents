@@ -73,6 +73,7 @@ export function useAutoReconnect(
     baseDelay = 1000,
     maxDelay = 8000,
     injectHistory = true,
+    mediaStreamRef,
   } = config;
 
   // ── Reconnection state ──
@@ -93,8 +94,8 @@ export function useAutoReconnect(
   callbacksRef.current = callbacks;
 
   // Stable ref for config values
-  const configRef = useRef({ maxAttempts, baseDelay, maxDelay, injectHistory });
-  configRef.current = { maxAttempts, baseDelay, maxDelay, injectHistory };
+  const configRef = useRef({ maxAttempts, baseDelay, maxDelay, injectHistory, mediaStreamRef });
+  configRef.current = { maxAttempts, baseDelay, maxDelay, injectHistory, mediaStreamRef };
 
   // ── Transcript accumulator for history injection ──
   const transcriptRef = useRef<HistoryEntry[]>([]);
@@ -153,11 +154,17 @@ export function useAutoReconnect(
         const savedOptions = lastConnectOptionsRef.current!;
         let reconnectOptions = savedOptions;
 
+        // Use the latest media stream from the ref if available
+        const currentStream = cfg.mediaStreamRef?.current;
+        if (currentStream) {
+          reconnectOptions = { ...reconnectOptions, mediaStream: currentStream };
+        }
+
         if (cfg.injectHistory && transcriptRef.current.length > 0) {
           // Merge: original history + accumulated transcript
           const existingHistory = savedOptions.history ?? [];
           reconnectOptions = {
-            ...savedOptions,
+            ...reconnectOptions,
             history: [...existingHistory, ...transcriptRef.current],
           };
         }

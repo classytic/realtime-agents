@@ -122,6 +122,8 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private handlers: TransportEventHandlers | null = null;
   private activeResponseRef = false;
   private audioPlayingRef = false;
+  /** Whether the current response produced any audio output (speaking). */
+  private responseHadAudio = false;
   private usageSnapshot: UsageInfo | null = null;
 
   private readonly transport: "webrtc" | "websocket";
@@ -333,6 +335,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.cleanupWebSocketAudio();
     this.activeResponseRef = false;
     this.audioPlayingRef = false;
+    this.responseHadAudio = false;
     this.handlers = null;
   }
 
@@ -426,6 +429,60 @@ export class OpenAIAdapter implements RealtimeAdapter {
     if (!this.activeResponseRef) {
       this.activeResponseRef = true;
       transport?.sendEvent({ type: "response.create" });
+    }
+  }
+
+  async replaceAudioTrack(newStream: MediaStream): Promise<void> {
+    if (!this.session) {
+      console.warn("[OpenAIAdapter] Cannot replace audio track — no active session");
+      return;
+    }
+
+    const newTrack = newStream.getAudioTracks()[0];
+    if (!newTrack) {
+      console.warn("[OpenAIAdapter] No audio track in provided stream");
+      return;
+    }
+
+    if (this.transport === "webrtc") {
+      // Access the peer connection from the SDK transport
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const transport = (this.session as any)?.transport;
+      const pc: RTCPeerConnection | undefined =
+        transport?.connectionState?.peerConnection;
+      if (!pc) {
+        console.warn("[OpenAIAdapter] No peer connection available for track replacement");
+        return;
+      }
+      const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+      if (sender) {
+        await sender.replaceTrack(newTrack);
+      } else {
+        console.warn("[OpenAIAdapter] No audio sender found on peer connection");
+      }
+    } else {
+      // WebSocket transport: reconnect the AudioWorklet input source
+      if (this.wsInputCtx && this.wsWorkletNode) {
+        if (this.wsInputSource) {
+          this.wsInputSource.disconnect();
+        }
+        this.wsMediaStream = newStream;
+        this.wsOwnsMediaStream = false;
+        this.wsInputSource = this.wsInputCtx.createMediaStreamSource(newStream);
+        this.wsInputSource.connect(this.wsWorkletNode);
+      }
+    }
+  }
+
+  updateSessionConfig(config: Record<string, unknown>): void {
+    if (!this.session) {
+      console.warn("[OpenAIAdapter] Cannot update config — no active session");
+      return;
+    }
+    try {
+      (this.session as any).updateSessionConfig?.(config);
+    } catch (e) {
+      console.warn("[OpenAIAdapter] Failed to update session config:", e);
     }
   }
 
@@ -721,17 +778,24 @@ export class OpenAIAdapter implements RealtimeAdapter {
           // ── Response lifecycle ──
           case "response.created":
             this.activeResponseRef = true;
+            this.responseHadAudio = false;
             handlers.onAgentStatusChange("thinking");
             break;
-          case "response.done":
+          case "response.done": {
             this.activeResponseRef = false;
+            const hadAudio = this.responseHadAudio;
+            this.responseHadAudio = false;
             queueMicrotask(() => this.emitUsageUpdate());
             // WebRTC: audio may still be playing through the media track.
             // Only go idle if the audio buffer has already stopped.
             if (!this.audioPlayingRef) {
-              handlers.onAgentStatusChange("idle");
+              // If the response produced no audio (AI decided not to respond,
+              // e.g. during a mid-sentence VAD pause), stay in "listening"
+              // instead of flashing "idle" — the AI is still actively listening.
+              handlers.onAgentStatusChange(hadAudio ? "idle" : "listening");
             }
             break;
+          }
 
           // ── Audio output ──
           // WebSocket: response.output_audio.delta fires per PCM chunk
@@ -739,10 +803,12 @@ export class OpenAIAdapter implements RealtimeAdapter {
           //         output_audio_buffer events track playback state instead
           case "response.output_audio.delta":
           case "response.output_audio_transcript.delta":
+            this.responseHadAudio = true;
             handlers.onAgentStatusChange("speaking");
             break;
           case "output_audio_buffer.started":
             this.audioPlayingRef = true;
+            this.responseHadAudio = true;
             handlers.onAgentStatusChange("speaking");
             break;
           case "output_audio_buffer.stopped":

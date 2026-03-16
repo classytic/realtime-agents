@@ -256,6 +256,14 @@ export function useRealtimeSession(
     return adapterRef.current.getUsage();
   }, []);
 
+  const updateSessionConfig = useCallback((config: Record<string, unknown>) => {
+    adapterRef.current.updateSessionConfig?.(config);
+  }, []);
+
+  const replaceAudioTrack = useCallback(async (newStream: MediaStream) => {
+    await adapterRef.current.replaceAudioTrack?.(newStream);
+  }, []);
+
   return {
     status,
     agentStatus,
@@ -270,6 +278,8 @@ export function useRealtimeSession(
     sendEvent,
     sendSimulatedUserMessage,
     getUsage,
+    updateSessionConfig,
+    replaceAudioTrack,
     usage,
   };
 }
