@@ -206,7 +206,7 @@ export interface RealtimeAdapter {
   pushToTalkStart(): void;
   pushToTalkStop(): void;
   sendRawEvent(event: unknown): void;
-  sendSimulatedUserMessage(text: string): void;
+  sendSimulatedUserMessage(text: string, options?: { triggerResponse?: boolean }): void;
   getUsage(): UsageInfo | null;
   readonly providerName: string;
 
@@ -272,7 +272,7 @@ export interface UseRealtimeSessionReturn {
   readonly pushToTalkStart: () => void;
   readonly pushToTalkStop: () => void;
   readonly sendEvent: (event: unknown) => void;
-  readonly sendSimulatedUserMessage: (text: string) => void;
+  readonly sendSimulatedUserMessage: (text: string, options?: { triggerResponse?: boolean }) => void;
   readonly getUsage: () => UsageInfo | null;
   /** Update session config mid-session (turn detection, noise reduction, etc.) */
   readonly updateSessionConfig: (config: Record<string, unknown>) => void;

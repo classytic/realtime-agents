@@ -248,9 +248,12 @@ export function useRealtimeSession(
     adapterRef.current.sendRawEvent(event);
   }, []);
 
-  const sendSimulatedUserMessage = useCallback((text: string) => {
-    adapterRef.current.sendSimulatedUserMessage(text);
-  }, []);
+  const sendSimulatedUserMessage = useCallback(
+    (text: string, options?: { triggerResponse?: boolean }) => {
+      adapterRef.current.sendSimulatedUserMessage(text, options);
+    },
+    [],
+  );
 
   const getUsage = useCallback((): UsageInfo | null => {
     return adapterRef.current.getUsage();

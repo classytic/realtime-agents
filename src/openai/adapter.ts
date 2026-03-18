@@ -412,8 +412,12 @@ export class OpenAIAdapter implements RealtimeAdapter {
     (this.session as any)?.transport?.sendEvent(event);
   }
 
-  sendSimulatedUserMessage(text: string): void {
+  sendSimulatedUserMessage(
+    text: string,
+    options?: { triggerResponse?: boolean },
+  ): void {
     if (!this.session) return;
+    const { triggerResponse = true } = options ?? {};
     const id = crypto.randomUUID().slice(0, 32);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const transport = (this.session as any)?.transport;
@@ -426,7 +430,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
         content: [{ type: "input_text", text }],
       },
     });
-    if (!this.activeResponseRef) {
+    if (triggerResponse && !this.activeResponseRef) {
       this.activeResponseRef = true;
       transport?.sendEvent({ type: "response.create" });
     }

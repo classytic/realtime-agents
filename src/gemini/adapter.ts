@@ -296,8 +296,25 @@ export class GeminiAdapter implements RealtimeAdapter {
     console.warn('[GeminiAdapter] sendRawEvent is not supported');
   }
 
-  sendSimulatedUserMessage(text: string): void {
-    this.sendMessage(text);
+  sendSimulatedUserMessage(
+    text: string,
+    options?: { triggerResponse?: boolean },
+  ): void {
+    if (!this.connected || !this.resolvedSession) return;
+    const { triggerResponse = true } = options ?? {};
+
+    // Text messages have no server-side transcription — emit locally
+    const itemId = `gemini-user-${++this.transcriptIdCounter}`;
+    this.emitHistoryAdded(itemId, 'user');
+    this.handlers?.onTranscriptDelta(itemId, text);
+    this.handlers?.onTranscriptComplete({ role: 'user', text, itemId });
+
+    try {
+      this.resolvedSession.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text }] }],
+        turnComplete: triggerResponse,
+      });
+    } catch { /* WebSocket closing */ }
   }
 
   updateSessionConfig(_config: Record<string, unknown>): void {
