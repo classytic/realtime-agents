@@ -51,6 +51,13 @@ export class GeminiAdapter implements RealtimeAdapter {
   /** Whether the server has signalled turn completion (audio may still be playing) */
   private turnCompleteReceived = false;
 
+  // ── Non-interruptible mode ──
+  // Gemini uses client-side audio via WebSocket. Setting isMuted=true
+  // stops audio from being sent, so the server can't detect speech.
+  private interruptible = true;
+  private autoMutedForNonInterrupt = false;
+  private userMuted = false;
+
   private activeTools: Map<string, AgentTool> = new Map();
 
   /** The MediaStream used for audio (and optionally video) input */
@@ -266,8 +273,28 @@ export class GeminiAdapter implements RealtimeAdapter {
     } catch { /* WebSocket closing */ }
   }
 
-  mute(muted: boolean): void {
+  mute(muted: boolean, options?: { source?: 'user' | 'system' }): void {
+    const source = options?.source ?? 'user';
+    if (source === 'user' && !this.autoMutedForNonInterrupt) {
+      this.userMuted = muted;
+    }
     this.isMuted = muted;
+  }
+
+  /** Auto-mute mic when AI starts speaking in non-interruptible mode. */
+  private autoMuteForSpeaking(): void {
+    if (this.interruptible || this.autoMutedForNonInterrupt) return;
+    this.autoMutedForNonInterrupt = true;
+    this.isMuted = true;
+  }
+
+  /** Restore mic after AI stops speaking in non-interruptible mode. Respects user mute. */
+  private autoUnmuteAfterSpeaking(): void {
+    if (!this.autoMutedForNonInterrupt) return;
+    this.autoMutedForNonInterrupt = false;
+    if (!this.userMuted) {
+      this.isMuted = false;
+    }
   }
 
   interrupt(): void {
@@ -277,6 +304,7 @@ export class GeminiAdapter implements RealtimeAdapter {
     }
     this.activeSources.clear();
     this.turnCompleteReceived = false;
+    this.autoUnmuteAfterSpeaking();
 
     if (this.outputAudioContext) {
       this.nextStartTime = this.outputAudioContext.currentTime;
@@ -317,12 +345,27 @@ export class GeminiAdapter implements RealtimeAdapter {
     } catch { /* WebSocket closing */ }
   }
 
-  updateSessionConfig(_config: Record<string, unknown>): void {
-    console.warn("[GeminiAdapter] updateSessionConfig is not supported for Gemini sessions");
+  updateSessionConfig(config: Record<string, unknown>): void {
+    // Gemini doesn't support live session updates, but we handle
+    // the interruptible toggle client-side via auto-mute.
+    const td = (config as { audio?: { input?: { turnDetection?: { interruptResponse?: boolean } } } })
+      .audio?.input?.turnDetection;
+    if (typeof td?.interruptResponse === 'boolean') {
+      this.interruptible = td.interruptResponse;
+    }
   }
 
-  async replaceAudioTrack(_newStream: MediaStream): Promise<void> {
-    console.warn("[GeminiAdapter] replaceAudioTrack is not yet supported for Gemini sessions");
+  async replaceAudioTrack(newStream: MediaStream): Promise<void> {
+    if (!this.inputAudioContext || !this.audioWorkletNode) {
+      throw new Error("[GeminiAdapter] Audio pipeline not initialized");
+    }
+    if (this.inputSource) {
+      this.inputSource.disconnect();
+    }
+    this.mediaStream = newStream;
+    this.externalStream = true;
+    this.inputSource = this.inputAudioContext.createMediaStreamSource(newStream);
+    this.inputSource.connect(this.audioWorkletNode);
   }
 
   getUsage(): UsageInfo | null {
@@ -587,11 +630,15 @@ export class GeminiAdapter implements RealtimeAdapter {
     if (msg.voiceActivity) {
       const type = msg.voiceActivity.voiceActivityType;
       if (type === 'ACTIVITY_START') {
-        // New user speech turn — create a stable ID and transcript item
-        this.currentUserItemId = `gemini-user-${++this.transcriptIdCounter}`;
-        this.emitHistoryAdded(this.currentUserItemId, 'user');
-        this.handlers?.onAgentStatusChange('listening');
-        this.handlers?.onUserSpeechStart?.();
+        // Suppress status change when non-interruptible and AI is active
+        if (!this.interruptible && this.activeSources.size > 0) {
+          this.handlers?.onUserSpeechStart?.();
+        } else {
+          this.currentUserItemId = `gemini-user-${++this.transcriptIdCounter}`;
+          this.emitHistoryAdded(this.currentUserItemId, 'user');
+          this.handlers?.onAgentStatusChange('listening');
+          this.handlers?.onUserSpeechStart?.();
+        }
       } else if (type === 'ACTIVITY_END') {
         this.handlers?.onUserSpeechStop?.();
       }
@@ -784,6 +831,7 @@ export class GeminiAdapter implements RealtimeAdapter {
       // until the server signals the turn is done AND all audio finishes.
       this.turnCompleteReceived = false;
       this.handlers?.onAgentStatusChange('speaking');
+      this.autoMuteForSpeaking();
 
       if (this.nextStartTime < this.outputAudioContext.currentTime) {
         this.nextStartTime = this.outputAudioContext.currentTime;
@@ -809,6 +857,7 @@ export class GeminiAdapter implements RealtimeAdapter {
           // Only go idle when ALL sources are done AND the server has
           // signalled turn completion (same pattern as OpenAI's audioPlayingRef).
           if (this.activeSources.size === 0 && this.turnCompleteReceived) {
+            this.autoUnmuteAfterSpeaking();
             this.handlers?.onAgentStatusChange('idle');
           }
         };
@@ -824,6 +873,7 @@ export class GeminiAdapter implements RealtimeAdapter {
       }
       this.activeSources.clear();
       this.nextStartTime = this.outputAudioContext.currentTime;
+      this.autoUnmuteAfterSpeaking();
       this.handlers?.onAgentStatusChange('idle');
     }
   }
@@ -924,6 +974,9 @@ export class GeminiAdapter implements RealtimeAdapter {
     this.currentUserItemId = null;
     this.currentAssistantItemId = null;
     this.turnCompleteReceived = false;
+    this.interruptible = true;
+    this.autoMutedForNonInterrupt = false;
+    this.userMuted = false;
     // Don't reset lastSessionHandle — consumers may need it after disconnect
   }
 }

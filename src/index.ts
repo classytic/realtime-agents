@@ -48,6 +48,18 @@ export { useRealtimeSession } from './use-realtime-session.js';
 export { useAutoReconnect } from './use-auto-reconnect.js';
 export { useSessionHistory } from './use-session-history.js';
 
+// ── Session Control ──
+export { SessionControl, SESSION_CONTROL_DEFAULTS } from './session-control.js';
+export { useSessionControl } from './use-session-control.js';
+export type {
+  SessionControlState,
+  SessionControlActions,
+  EagernessLevel,
+  NoiseReductionMode,
+  OutputModality,
+} from './session-control.js';
+export type { UseSessionControlReturn } from './use-session-control.js';
+
 // ── Context Providers ──
 export { EventProvider, useEvent } from './event-context.js';
 export { TranscriptProvider, useTranscript } from './transcript-context.js';

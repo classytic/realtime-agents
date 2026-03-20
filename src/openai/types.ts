@@ -74,6 +74,8 @@ export interface OpenAIAdapterOptions {
   readonly contextManagement?: ContextManagement;
   /** Reusable OpenAI session options applied to every connect call unless overridden. */
   readonly sessionOptions?: OpenAISessionProviderOptions;
+  /** Enable verbose debug logging for the adapter (default: false). Also toggleable at runtime via `window.__OPENAI_ADAPTER_DEBUG = true`. */
+  readonly debug?: boolean;
 }
 
 export function openAIAgentOptions(

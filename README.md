@@ -103,7 +103,8 @@ await session.connect({
 // Controls
 session.sendMessage("Hello!");
 session.sendImage(canvasDataUrl); // Send image to the model
-session.mute(true);
+session.mute(true); // User mute — blocks auto-unmute
+session.mute(true, { source: "system" }); // System mute — auto-unmute still works
 session.interrupt();
 session.disconnect();
 ```
@@ -262,7 +263,7 @@ The `useRealtimeSession` hook returns these controls:
 | `sendMessage(text)`              | Send a text message to the agent                                                                     |
 | `sendImage(dataUrl, options?)`   | Send an image to the model. `triggerResponse` (default `false`) makes the model respond to the image |
 | `sendSimulatedUserMessage(text)` | Inject a synthetic user message into the conversation (appears as if the user said it)               |
-| `mute(muted)`                    | Mute/unmute the microphone                                                                           |
+| `mute(muted, options?)`          | Mute/unmute the microphone. Pass `{ source: 'system' }` for programmatic mutes that shouldn't block auto-unmute in non-interruptible mode (default: `'user'`) |
 | `interrupt()`                    | Interrupt the agent's current response                                                               |
 | `pushToTalkStart()`              | Begin push-to-talk recording                                                                         |
 | `pushToTalkStop()`               | End push-to-talk recording                                                                           |

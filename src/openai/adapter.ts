@@ -32,6 +32,20 @@ import type {
 /** Default sample rate for OpenAI Realtime PCM16 audio */
 const OPENAI_SAMPLE_RATE = 24000;
 
+/**
+ * Centralized debug logger for the OpenAI adapter.
+ * Enable/disable via `OpenAIAdapter.debug = true/false` or `window.__OPENAI_ADAPTER_DEBUG = true`.
+ */
+let _adapterDebug = false;
+function adapterLog(...args: unknown[]) {
+  // Check window-level flag (settable from browser console) or static flag
+  const enabled = _adapterDebug ||
+    (typeof globalThis !== "undefined" && (globalThis as Record<string, unknown>).__OPENAI_ADAPTER_DEBUG === true);
+  if (enabled) {
+    console.log("[OpenAIAdapter]", ...args);
+  }
+}
+
 function mergeOpenAISessionConfig(
   ...configs: Array<Partial<RealtimeSessionConfig> | undefined>
 ): Partial<RealtimeSessionConfig> {
@@ -116,6 +130,10 @@ function mergeOpenAISessionOptions(
 }
 
 export class OpenAIAdapter implements RealtimeAdapter {
+  /** Enable/disable debug logging. Also toggleable via `window.__OPENAI_ADAPTER_DEBUG = true` in browser console. */
+  static set debug(enabled: boolean) { _adapterDebug = enabled; }
+  static get debug() { return _adapterDebug; }
+
   readonly providerName = "openai";
 
   private session: RealtimeSession | null = null;
@@ -138,6 +156,27 @@ export class OpenAIAdapter implements RealtimeAdapter {
     mode: "auto" | "disabled";
     retentionRatio?: number;
   };
+
+  // ── Non-interruptible mode ──
+  //
+  // OpenAI's `interrupt_response: false` tells the server not to cancel
+  // responses on speech detection, but the WebRTC server still clears the
+  // output audio buffer when it detects ANY mic input. The only reliable
+  // way to prevent interruption is to mute the mic while the AI speaks
+  // and unmute after `output_audio_buffer.stopped` (not `response.done`,
+  // which fires before audio finishes playing on WebRTC).
+  //
+  // Flow: audio delta → autoMuteForSpeaking() → AI speaks uninterrupted
+  //       → buffer stopped → autoUnmuteAfterSpeaking() → mic restored
+
+  /** When false, the adapter auto-mutes the mic while the AI speaks. */
+  private interruptible = true;
+  /** Whether the mic was auto-muted by non-interruptible logic. */
+  private autoMutedForNonInterrupt = false;
+  /** Whether the user explicitly muted — prevents auto-unmute from overriding. */
+  private userMuted = false;
+  /** Source MediaStream for WebRTC — used to disable tracks at source. */
+  private webrtcMediaStream: MediaStream | null = null;
 
   // ── WebRTC output audio visualization ──
   private webrtcAudioCtx: AudioContext | null = null;
@@ -171,6 +210,9 @@ export class OpenAIAdapter implements RealtimeAdapter {
       mode: options.contextManagement?.mode ?? "auto",
       retentionRatio: options.contextManagement?.retentionRatio ?? 0.8,
     };
+    if (options.debug) {
+      _adapterDebug = true;
+    }
   }
 
   /**
@@ -232,10 +274,12 @@ export class OpenAIAdapter implements RealtimeAdapter {
             },
           });
 
-    this.session = new RealtimeSession(agent, {
-      transport: transportLayer,
-      model: this.model,
-      config: mergeOpenAISessionConfig({
+    // Store the mediaStream for WebRTC non-interruptible auto-mute
+    if (this.transport !== "websocket" && options.mediaStream) {
+      this.webrtcMediaStream = options.mediaStream;
+    }
+
+    const mergedConfig = mergeOpenAISessionConfig({
         outputModalities: ["audio"],
         audio: {
           input: {
@@ -266,7 +310,20 @@ export class OpenAIAdapter implements RealtimeAdapter {
           },
         },
         ...this.buildTruncationConfig(),
-      }, openaiSessionOptions.sessionConfig),
+      }, openaiSessionOptions.sessionConfig);
+
+    // Sync interruptible state from the merged initial config
+    const initialTd = (mergedConfig as { audio?: { input?: { turnDetection?: { interruptResponse?: boolean } } } })
+      .audio?.input?.turnDetection;
+    if (typeof initialTd?.interruptResponse === 'boolean') {
+      this.interruptible = initialTd.interruptResponse;
+
+    }
+
+    this.session = new RealtimeSession(agent, {
+      transport: transportLayer,
+      model: this.model,
+      config: mergedConfig,
       context: options.context ?? {},
       outputGuardrails: openaiSessionOptions.outputGuardrails as any,
       outputGuardrailSettings: openaiSessionOptions.outputGuardrailSettings as any,
@@ -336,6 +393,10 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.activeResponseRef = false;
     this.audioPlayingRef = false;
     this.responseHadAudio = false;
+    this.interruptible = true;
+    this.autoMutedForNonInterrupt = false;
+    this.userMuted = false;
+    this.webrtcMediaStream = null;
     this.handlers = null;
   }
 
@@ -356,17 +417,62 @@ export class OpenAIAdapter implements RealtimeAdapter {
     });
   }
 
-  mute(muted: boolean): void {
+  mute(muted: boolean, options?: { source?: 'user' | 'system' }): void {
+    const source = options?.source ?? 'user';
+    // Only track as user-initiated if source is 'user'.
+    // System mutes (e.g. response timer) must NOT set userMuted,
+    // otherwise autoUnmuteAfterSpeaking() skips the unmute permanently.
+    if (source === 'user' && !this.autoMutedForNonInterrupt) {
+      this.userMuted = muted;
+    }
+    this.applyMute(muted);
+  }
+
+  /** Low-level mute — applies to transport without touching userMuted flag. */
+  private applyMute(muted: boolean): void {
     if (this.transport === "websocket") {
-      // WebSocket transport throws on session.mute — handle at adapter level
       this.wsIsMuted = muted;
     } else {
       this.session?.mute(muted);
+      if (this.webrtcMediaStream) {
+        this.webrtcMediaStream.getAudioTracks().forEach((track) => {
+          track.enabled = !muted;
+        });
+      }
+      adapterLog(`mute(${muted}) — session.mute called, source tracks ${muted ? "disabled" : "enabled"}`);
     }
+  }
+
+  /** Auto-mute the mic when AI starts speaking in non-interruptible mode. Idempotent. */
+  private autoMuteForSpeaking(): void {
+    if (this.interruptible || this.autoMutedForNonInterrupt) return;
+    this.autoMutedForNonInterrupt = true;
+    adapterLog("non-interruptible: auto-muting mic");
+    this.applyMute(true);
+  }
+
+  /** Restore mic after AI stops speaking in non-interruptible mode. Respects user mute. */
+  private autoUnmuteAfterSpeaking(): void {
+    if (!this.autoMutedForNonInterrupt) return;
+    this.autoMutedForNonInterrupt = false;
+    // Don't unmute if the user explicitly muted before/during AI speech
+    if (this.userMuted) {
+      adapterLog("non-interruptible: skipping unmute (user manually muted)");
+      return;
+    }
+    adapterLog("non-interruptible: unmuting mic");
+    this.applyMute(false);
+  }
+
+  /** Whether status change should be suppressed (non-interruptible + AI active). */
+  private shouldSuppressStatusChange(): boolean {
+    return !this.interruptible && (this.audioPlayingRef || this.activeResponseRef);
   }
 
   interrupt(): void {
     if (!this.session) return;
+    // When non-interruptible, only allow explicit interrupt() calls
+    // (e.g. from the UI button), not automatic ones from VAD
     try {
       this.session.interrupt();
     } catch {
@@ -438,32 +544,17 @@ export class OpenAIAdapter implements RealtimeAdapter {
 
   async replaceAudioTrack(newStream: MediaStream): Promise<void> {
     if (!this.session) {
-      console.warn("[OpenAIAdapter] Cannot replace audio track — no active session");
-      return;
+      throw new Error("[OpenAIAdapter] Cannot replace audio track — no active session");
     }
 
     const newTrack = newStream.getAudioTracks()[0];
     if (!newTrack) {
-      console.warn("[OpenAIAdapter] No audio track in provided stream");
-      return;
+      throw new Error("[OpenAIAdapter] No audio track in provided stream");
     }
 
     if (this.transport === "webrtc") {
-      // Access the peer connection from the SDK transport
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const transport = (this.session as any)?.transport;
-      const pc: RTCPeerConnection | undefined =
-        transport?.connectionState?.peerConnection;
-      if (!pc) {
-        console.warn("[OpenAIAdapter] No peer connection available for track replacement");
-        return;
-      }
-      const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
-      if (sender) {
-        await sender.replaceTrack(newTrack);
-      } else {
-        console.warn("[OpenAIAdapter] No audio sender found on peer connection");
-      }
+      await this.replaceWebRTCAudioTrack(newTrack);
+      this.webrtcMediaStream = newStream;
     } else {
       // WebSocket transport: reconnect the AudioWorklet input source
       if (this.wsInputCtx && this.wsWorkletNode) {
@@ -474,8 +565,143 @@ export class OpenAIAdapter implements RealtimeAdapter {
         this.wsOwnsMediaStream = false;
         this.wsInputSource = this.wsInputCtx.createMediaStreamSource(newStream);
         this.wsInputSource.connect(this.wsWorkletNode);
+      } else {
+        throw new Error("[OpenAIAdapter] WebSocket audio pipeline not initialized");
       }
     }
+  }
+
+  /**
+   * Replace the audio track on the WebRTC peer connection with retry logic.
+   *
+   * Non-Chrome browsers (Firefox, Safari) can have transient states where
+   * the peer connection or audio sender is temporarily unavailable during
+   * device changes. Retrying with backoff handles these cases.
+   */
+  private async replaceWebRTCAudioTrack(
+    newTrack: MediaStreamTrack,
+    maxRetries = 3,
+  ): Promise<void> {
+    const delays = [200, 500, 1000];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const transport = (this.session as any)?.transport;
+      const pc: RTCPeerConnection | undefined =
+        transport?.connectionState?.peerConnection;
+
+      if (!pc) {
+        if (attempt < maxRetries) {
+          console.warn(
+            `[OpenAIAdapter] No peer connection (attempt ${attempt + 1}/${maxRetries + 1}), retrying...`,
+          );
+          await this.delay(delays[attempt] ?? 1000);
+          continue;
+        }
+        throw new Error(
+          "[OpenAIAdapter] No peer connection available after retries",
+        );
+      }
+
+      // Validate connection state — replaceTrack may fail in non-stable states
+      const pcState = pc.connectionState ?? pc.iceConnectionState;
+      if (
+        pcState === "closed" ||
+        pcState === "failed" ||
+        pcState === "disconnected"
+      ) {
+        throw new Error(
+          `[OpenAIAdapter] PeerConnection in '${pcState}' state — cannot replace track`,
+        );
+      }
+
+      const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+      if (!sender) {
+        if (attempt < maxRetries) {
+          console.warn(
+            `[OpenAIAdapter] No audio sender found (attempt ${attempt + 1}/${maxRetries + 1}), retrying...`,
+          );
+          await this.delay(delays[attempt] ?? 1000);
+          continue;
+        }
+        throw new Error(
+          "[OpenAIAdapter] No audio sender on peer connection after retries",
+        );
+      }
+
+      try {
+        await sender.replaceTrack(newTrack);
+        if (attempt > 0) {
+          console.log(
+            `[OpenAIAdapter] Audio track replaced successfully on attempt ${attempt + 1}`,
+          );
+        }
+        return;
+      } catch (err) {
+        if (attempt < maxRetries) {
+          console.warn(
+            `[OpenAIAdapter] replaceTrack failed (attempt ${attempt + 1}/${maxRetries + 1}):`,
+            err,
+          );
+          await this.delay(delays[attempt] ?? 1000);
+          continue;
+        }
+        throw new Error(
+          `[OpenAIAdapter] replaceTrack failed after ${maxRetries + 1} attempts: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Convert a camelCase partial config to snake_case wire format for session.update.
+   * Only includes fields that are present — no merging with defaults.
+   */
+  private buildPartialSessionPayload(
+    config: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+
+    // Handle audio.input.turnDetection → audio.input.turn_detection
+    const audio = config.audio as
+      | { input?: { turnDetection?: Record<string, unknown>; noiseReduction?: unknown } }
+      | undefined;
+
+    if (audio?.input) {
+      const inputResult: Record<string, unknown> = {};
+
+      if (audio.input.turnDetection) {
+        const td = audio.input.turnDetection;
+        const tdResult: Record<string, unknown> = {};
+        if (td.type !== undefined) tdResult.type = td.type;
+        if (td.eagerness !== undefined) tdResult.eagerness = td.eagerness;
+        if (td.interruptResponse !== undefined) tdResult.interrupt_response = td.interruptResponse;
+        if (td.createResponse !== undefined) tdResult.create_response = td.createResponse;
+        if (td.prefixPaddingMs !== undefined) tdResult.prefix_padding_ms = td.prefixPaddingMs;
+        if (td.silenceDurationMs !== undefined) tdResult.silence_duration_ms = td.silenceDurationMs;
+        if (td.threshold !== undefined) tdResult.threshold = td.threshold;
+        inputResult.turn_detection = tdResult;
+      }
+
+      if (audio.input.noiseReduction !== undefined) {
+        inputResult.noise_reduction = audio.input.noiseReduction;
+      }
+
+      result.audio = { input: inputResult };
+    }
+
+    // Handle outputModalities → output_modalities
+    if ((config as { outputModalities?: unknown }).outputModalities !== undefined) {
+      result.output_modalities = (config as { outputModalities: unknown }).outputModalities;
+    }
+
+    return result;
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   updateSessionConfig(config: Record<string, unknown>): void {
@@ -483,8 +709,43 @@ export class OpenAIAdapter implements RealtimeAdapter {
       console.warn("[OpenAIAdapter] Cannot update config — no active session");
       return;
     }
+
+    // Track interruptible state for client-side enforcement
+    // Support both snake_case (raw API) and camelCase (SDK convention)
+    const audioInput = (config as { audio?: { input?: { turn_detection?: { interrupt_response?: boolean }; turnDetection?: { interruptResponse?: boolean } } } })
+      .audio?.input;
+    const interruptVal = audioInput?.turn_detection?.interrupt_response
+      ?? audioInput?.turnDetection?.interruptResponse;
+    if (typeof interruptVal === 'boolean') {
+      this.interruptible = interruptVal;
+    }
+
     try {
-      (this.session as any).updateSessionConfig?.(config);
+      // Send partial session.update directly via transport.sendEvent.
+      //
+      // We do NOT use transport.updateSessionConfig() because it calls
+      // _getMergedSessionConfig() which merges with DEFAULT config — resetting
+      // instructions, tools, voice, and turn_detection back to defaults.
+      // OpenAI's session.update API supports partial updates — only the fields
+      // included in the event are changed, others are preserved server-side.
+      //
+      // Config must use snake_case wire format (same as the API expects).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const transport = (this.session as any)?.transport;
+      const payload = this.buildPartialSessionPayload(config);
+      const sessionUpdate = {
+        type: 'session.update' as const,
+        session: {
+          type: 'realtime',
+          ...payload,
+        },
+      };
+
+      if (transport?.sendEvent) {
+        transport.sendEvent(sessionUpdate);
+      } else {
+        console.warn("[OpenAIAdapter] Transport does not support sendEvent");
+      }
     } catch (e) {
       console.warn("[OpenAIAdapter] Failed to update session config:", e);
     }
@@ -659,6 +920,11 @@ export class OpenAIAdapter implements RealtimeAdapter {
 
       source.onended = () => {
         this.wsActiveSources.delete(source);
+        // WebSocket: unmute when all audio sources finish (mirrors
+        // output_audio_buffer.stopped behavior on WebRTC)
+        if (this.wsActiveSources.size === 0 && !this.activeResponseRef) {
+          this.autoUnmuteAfterSpeaking();
+        }
       };
     } catch (e) {
       console.error("[OpenAIAdapter] WebSocket audio decode error", e);
@@ -789,6 +1055,9 @@ export class OpenAIAdapter implements RealtimeAdapter {
             this.activeResponseRef = false;
             const hadAudio = this.responseHadAudio;
             this.responseHadAudio = false;
+            // Unmute only if audio already stopped; otherwise defer to
+            // output_audio_buffer.stopped (WebRTC audio outlives response.done).
+            if (!this.audioPlayingRef) this.autoUnmuteAfterSpeaking();
             queueMicrotask(() => this.emitUsageUpdate());
             // WebRTC: audio may still be playing through the media track.
             // Only go idle if the audio buffer has already stopped.
@@ -809,14 +1078,24 @@ export class OpenAIAdapter implements RealtimeAdapter {
           case "response.output_audio_transcript.delta":
             this.responseHadAudio = true;
             handlers.onAgentStatusChange("speaking");
+            this.autoMuteForSpeaking();
             break;
           case "output_audio_buffer.started":
             this.audioPlayingRef = true;
             this.responseHadAudio = true;
             handlers.onAgentStatusChange("speaking");
+            this.autoMuteForSpeaking();
             break;
           case "output_audio_buffer.stopped":
+            this.audioPlayingRef = false;
+            this.autoUnmuteAfterSpeaking();
+            if (!this.activeResponseRef) {
+              handlers.onAgentStatusChange("idle");
+            }
+            break;
           case "output_audio_buffer.cleared":
+            adapterLog(`buffer cleared — interruptible=${this.interruptible}, activeResponse=${this.activeResponseRef}`);
+            if (!this.interruptible && this.activeResponseRef) break;
             this.audioPlayingRef = false;
             if (!this.activeResponseRef) {
               handlers.onAgentStatusChange("idle");
@@ -825,12 +1104,21 @@ export class OpenAIAdapter implements RealtimeAdapter {
 
           // ── Voice activity detection ──
           case "input_audio_buffer.speech_started":
-            handlers.onAgentStatusChange("listening");
-            handlers.onUserSpeechStart?.();
+            adapterLog(`speech_started — interruptible=${this.interruptible}, audioPlaying=${this.audioPlayingRef}, activeResponse=${this.activeResponseRef}`);
+            if (this.shouldSuppressStatusChange()) {
+              handlers.onUserSpeechStart?.();
+            } else {
+              handlers.onAgentStatusChange("listening");
+              handlers.onUserSpeechStart?.();
+            }
             break;
           case "input_audio_buffer.speech_stopped":
-            handlers.onAgentStatusChange("thinking");
-            handlers.onUserSpeechStop?.();
+            if (this.shouldSuppressStatusChange()) {
+              handlers.onUserSpeechStop?.();
+            } else {
+              handlers.onAgentStatusChange("thinking");
+              handlers.onUserSpeechStop?.();
+            }
             break;
         }
         handlers.onTransportEvent?.(event);

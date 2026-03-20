@@ -5,12 +5,6 @@
  * Source: OpenAI Agents SDK — openaiRealtimeBase.ts
  */
 
-export interface OpenAIRealtimeModel {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-}
-
 /**
  * Production-ready realtime models.
  *
@@ -18,7 +12,7 @@ export interface OpenAIRealtimeModel {
  * the latest stable version. Use dated variants only when you need
  * reproducible behaviour pinned to a specific release.
  */
-export const OPENAI_REALTIME_MODELS: readonly OpenAIRealtimeModel[] = [
+export const OPENAI_REALTIME_MODELS = [
   {
     id: "gpt-realtime",
     name: "GPT Realtime",
@@ -54,7 +48,18 @@ export const OPENAI_REALTIME_MODELS: readonly OpenAIRealtimeModel[] = [
     name: "GPT Realtime 1.5",
     description: "Latest GPT Realtime 1.5",
   },
-] as const;
+] as const satisfies readonly { id: string; name: string; description: string }[];
+
+/** Known model IDs from the list above. Accepts any string for forward compat. */
+export type OpenAIRealtimeModelId =
+  (typeof OPENAI_REALTIME_MODELS)[number]["id"] | (string & {});
+
+/** Shape of a single model entry */
+export interface OpenAIRealtimeModel {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+}
 
 export const OPENAI_DEFAULT_MODEL = "gpt-realtime";
 
@@ -89,6 +94,3 @@ export const OPENAI_TRANSPORTS: readonly {
 ] as const;
 
 export const OPENAI_DEFAULT_TRANSPORT: OpenAITransport = "webrtc";
-
-export type OpenAIRealtimeModelId =
-  (typeof OPENAI_REALTIME_MODELS)[number]["id"];

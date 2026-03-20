@@ -201,7 +201,18 @@ export interface RealtimeAdapter {
   disconnect(): void;
   sendMessage(text: string): void;
   sendImage(dataUrl: string, options?: { triggerResponse?: boolean }): void;
-  mute(muted: boolean): void;
+  /**
+   * Mute or unmute the audio input.
+   *
+   * @param muted - Whether to mute (true) or unmute (false).
+   * @param options.source - Who is muting:
+   *   - `'user'` (default): User clicked the mic button. Blocks auto-unmute
+   *     so the adapter doesn't override the user's explicit intent.
+   *   - `'system'`: Programmatic mute (e.g. response timer, grace period).
+   *     Does NOT block auto-unmute — the adapter's non-interruptible logic
+   *     can still restore the mic when the AI finishes speaking.
+   */
+  mute(muted: boolean, options?: { source?: 'user' | 'system' }): void;
   interrupt(): void;
   pushToTalkStart(): void;
   pushToTalkStop(): void;

@@ -45,12 +45,17 @@ export function useRealtimeSession(
   const adapterRef = useRef(adapter);
   adapterRef.current = adapter;
 
+  // Store callbacks in a ref to avoid invalidating every useCallback
+  // downstream when the consumer passes a new object literal each render.
+  const callbacksRef = useRef(callbacks);
+  callbacksRef.current = callbacks;
+
   const [status, setStatus] = useState<SessionStatus>('disconnected');
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle');
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const { logClientEvent, logServerEvent } = useEvent();
 
-  const historyHandlers = useSessionHistory().current;
+  const historyRef = useSessionHistory();
 
   // Track saved transcripts to prevent duplicates
   const savedTranscriptIds = useRef<Set<string>>(new Set());
@@ -58,18 +63,18 @@ export function useRealtimeSession(
   const updateStatus = useCallback(
     (newStatus: SessionStatus) => {
       setStatus(newStatus);
-      callbacks.onStatusChange?.(newStatus);
+      callbacksRef.current.onStatusChange?.(newStatus);
       logClientEvent({}, newStatus.toUpperCase());
     },
-    [callbacks, logClientEvent],
+    [logClientEvent],
   );
 
   const updateAgentStatus = useCallback(
     (newStatus: AgentStatus) => {
       setAgentStatus(newStatus);
-      callbacks.onAgentStatusChange?.(newStatus);
+      callbacksRef.current.onAgentStatusChange?.(newStatus);
     },
-    [callbacks],
+    [],
   );
 
   const connect = useCallback(
@@ -83,67 +88,67 @@ export function useRealtimeSession(
           onAgentStatusChange: updateAgentStatus,
           onError: (e) => {
             logServerEvent({ type: 'error', message: e.message });
-            callbacks.onError?.(e);
+            callbacksRef.current.onError?.(e);
           },
           onTranscriptDelta: (itemId, delta) => {
-            historyHandlers.handleTranscriptionDelta({ item_id: itemId, delta });
+            historyRef.current.handleTranscriptionDelta({ item_id: itemId, delta });
           },
           onTranscriptComplete: (entry) => {
-            callbacks.onTranscriptComplete?.(entry);
+            callbacksRef.current.onTranscriptComplete?.(entry);
           },
-          onAgentHandoff: callbacks.onAgentHandoff,
+          onAgentHandoff: callbacksRef.current.onAgentHandoff,
           onToolStart: (toolName, args) => {
-            callbacks.onToolStart?.(toolName, args);
-            historyHandlers.handleAgentToolStart(
+            callbacksRef.current.onToolStart?.(toolName, args);
+            historyRef.current.handleAgentToolStart(
               {},
               null,
               { name: toolName, arguments: args },
             );
           },
           onToolEnd: (toolName, result) => {
-            callbacks.onToolEnd?.(toolName, result);
-            historyHandlers.handleAgentToolEnd(
+            callbacksRef.current.onToolEnd?.(toolName, result);
+            historyRef.current.handleAgentToolEnd(
               {},
               null,
               { name: toolName },
               result,
             );
           },
-          onUserSpeechStart: callbacks.onUserSpeechStart,
-          onUserSpeechStop: callbacks.onUserSpeechStop,
+          onUserSpeechStart: callbacksRef.current.onUserSpeechStart,
+          onUserSpeechStop: callbacksRef.current.onUserSpeechStop,
           onTransportEvent: (event) => {
-            callbacks.onTransportEvent?.(event);
+            callbacksRef.current.onTransportEvent?.(event);
             // Handle transcript events from transport
             if (event.type === 'conversation.item.input_audio_transcription.completed') {
-              historyHandlers.handleTranscriptionCompleted(event);
-              if (callbacks.onTranscriptComplete && event.transcript) {
-                callbacks.onTranscriptComplete({
+              historyRef.current.handleTranscriptionCompleted(event);
+              if (callbacksRef.current.onTranscriptComplete && event.transcript) {
+                callbacksRef.current.onTranscriptComplete({
                   role: 'user',
                   text: String(event.transcript),
                   itemId: String(event.item_id || ''),
                 });
               }
             } else if (event.type === 'response.audio_transcript.done') {
-              historyHandlers.handleTranscriptionCompleted(event);
-              if (callbacks.onTranscriptComplete && event.transcript) {
-                callbacks.onTranscriptComplete({
+              historyRef.current.handleTranscriptionCompleted(event);
+              if (callbacksRef.current.onTranscriptComplete && event.transcript) {
+                callbacksRef.current.onTranscriptComplete({
                   role: 'assistant',
                   text: String(event.transcript),
                   itemId: String(event.item_id || ''),
                 });
               }
             } else if (event.type === 'response.audio_transcript.delta') {
-              historyHandlers.handleTranscriptionDelta(event);
+              historyRef.current.handleTranscriptionDelta(event);
             } else if (event.type === 'history_added') {
               const item = event.item as Record<string, unknown>;
               if (item) {
-                historyHandlers.handleHistoryAdded(item);
+                historyRef.current.handleHistoryAdded(item);
                 // Also fire onTranscriptComplete for assistant messages
                 if (item.type === 'message' && item.role === 'assistant' && item.itemId) {
                   const text = extractMessageText(item.content as unknown[]);
                   if (text && !savedTranscriptIds.current.has(item.itemId as string)) {
                     savedTranscriptIds.current.add(item.itemId as string);
-                    callbacks.onTranscriptComplete?.({
+                    callbacksRef.current.onTranscriptComplete?.({
                       role: 'assistant',
                       text,
                       itemId: String(item.itemId),
@@ -154,13 +159,13 @@ export function useRealtimeSession(
             } else if (event.type === 'history_updated') {
               const items = event.items as Record<string, unknown>[];
               if (items) {
-                historyHandlers.handleHistoryUpdated(items);
+                historyRef.current.handleHistoryUpdated(items);
                 items.forEach((item) => {
                   if (item.type === 'message' && item.role === 'assistant' && item.itemId) {
                     const text = extractMessageText(item.content as unknown[]);
                     if (text && !savedTranscriptIds.current.has(item.itemId as string)) {
                       savedTranscriptIds.current.add(item.itemId as string);
-                      callbacks.onTranscriptComplete?.({
+                      callbacksRef.current.onTranscriptComplete?.({
                         role: 'assistant',
                         text,
                         itemId: String(item.itemId),
@@ -174,17 +179,17 @@ export function useRealtimeSession(
             }
           },
           onGuardrailTripped: (result) => {
-            callbacks.onGuardrailTripped?.(result);
-            historyHandlers.handleGuardrailTripped(
+            callbacksRef.current.onGuardrailTripped?.(result);
+            historyRef.current.handleGuardrailTripped(
               {},
               null,
               { result },
             );
           },
-          onToolApprovalRequest: callbacks.onToolApprovalRequest,
+          onToolApprovalRequest: callbacksRef.current.onToolApprovalRequest,
           onUsageUpdate: (u) => {
             setUsage(u);
-            callbacks.onUsageUpdate?.(u);
+            callbacksRef.current.onUsageUpdate?.(u);
           },
         };
 
@@ -201,11 +206,11 @@ export function useRealtimeSession(
       } catch (error) {
         updateStatus('disconnected');
         const err = error instanceof Error ? error : new Error(String(error));
-        callbacks.onError?.(err);
+        callbacksRef.current.onError?.(err);
         throw error;
       }
     },
-    [callbacks, updateStatus, updateAgentStatus, historyHandlers, logServerEvent],
+    [updateStatus, updateAgentStatus, logServerEvent],
   );
 
   const disconnect = useCallback(() => {
@@ -228,8 +233,8 @@ export function useRealtimeSession(
     [],
   );
 
-  const mute = useCallback((muted: boolean) => {
-    adapterRef.current.mute(muted);
+  const mute = useCallback((muted: boolean, options?: { source?: 'user' | 'system' }) => {
+    adapterRef.current.mute(muted, options);
   }, []);
 
   const interrupt = useCallback(() => {
