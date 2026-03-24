@@ -1,6 +1,6 @@
 {
   "name": "@classytic/realtime-agents",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Provider-agnostic realtime voice agent orchestration for React (OpenAI Realtime, Gemini Live)",
   "type": "module",
   "sideEffects": false,

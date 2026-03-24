@@ -177,7 +177,6 @@ export class OpenAIAdapter implements RealtimeAdapter {
   private userMuted = false;
   /** Source MediaStream for WebRTC — used to disable tracks at source. */
   private webrtcMediaStream: MediaStream | null = null;
-
   /**
    * Safety timer: if `response.done` fires while `audioPlayingRef` is still true,
    * we defer status change to `output_audio_buffer.stopped`. But if that event
@@ -185,7 +184,27 @@ export class OpenAIAdapter implements RealtimeAdapter {
    * This timer clears the stuck state after a reasonable delay.
    */
   private audioStuckTimer: ReturnType<typeof setTimeout> | null = null;
-  private static readonly AUDIO_STUCK_TIMEOUT_MS = 5_000;
+  private static readonly AUDIO_STUCK_TIMEOUT_MS = 30_000;
+  /**
+   * Silence detection for WebRTC playout drain.
+   *
+   * On WebRTC, `output_audio_buffer.stopped` fires when the SERVER finishes
+   * sending audio, but the client's jitter buffer still has audio to play.
+   * Instead of a fixed delay, we poll the AnalyserNode (which reads real
+   * decoded audio energy from the media track) to detect when silence
+   * actually begins — matching the Gemini adapter's `source.onended` pattern.
+   *
+   * SILENCE_POLL_MS:      how often to sample the analyser
+   * SILENCE_THRESHOLD:    RMS below this = silence (0-128 scale, 128 = center)
+   * SILENCE_CONFIRM_COUNT: consecutive silent polls required before idle
+   * SILENCE_MAX_WAIT_MS:  safety cap — go idle even if analyser is unavailable
+   */
+  private static readonly SILENCE_POLL_MS = 50;
+  private static readonly SILENCE_THRESHOLD = 3;
+  private static readonly SILENCE_CONFIRM_COUNT = 3;
+  private static readonly SILENCE_MAX_WAIT_MS = 3_000;
+  private silencePollTimer: ReturnType<typeof setInterval> | null = null;
+  private silenceMaxTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── WebRTC output audio visualization ──
   private webrtcAudioCtx: AudioContext | null = null;
@@ -377,7 +396,6 @@ export class OpenAIAdapter implements RealtimeAdapter {
       }
       const lastEntry = options.history[options.history.length - 1];
       if (lastEntry.role === "user") {
-        this.activeResponseRef = true;
         transport?.sendEvent({ type: "response.create" });
       }
     }
@@ -400,6 +418,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
     this.cleanupWebRTCAnalyser();
     this.cleanupWebSocketAudio();
     this.clearAudioStuckTimer();
+    this.clearSilenceTimers();
     this.activeResponseRef = false;
     this.audioPlayingRef = false;
     this.responseHadAudio = false;
@@ -453,6 +472,83 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
   }
 
+  /**
+   * Poll the WebRTC AnalyserNode for silence, then call `onSilent`.
+   * Falls back to a fixed delay if no analyser is available.
+   */
+  private waitForSilence(onSilent: () => void): void {
+    this.clearSilenceTimers();
+
+    const analyser = this.webrtcAnalyser;
+    if (!analyser) {
+      adapterLog("waitForSilence — no analyser, fallback 500ms delay");
+      this.silenceMaxTimer = setTimeout(onSilent, 500);
+      return;
+    }
+    adapterLog("waitForSilence — polling analyser for silence");
+
+    const buf = new Uint8Array(analyser.fftSize);
+    let silentCount = 0;
+
+    this.silencePollTimer = setInterval(() => {
+      analyser.getByteTimeDomainData(buf);
+      // Compute RMS deviation from center (128). Silent = all ~128.
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = buf[i] - 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / buf.length);
+
+      if (rms < OpenAIAdapter.SILENCE_THRESHOLD) {
+        silentCount++;
+        if (silentCount >= OpenAIAdapter.SILENCE_CONFIRM_COUNT) {
+          adapterLog(`silence confirmed after ${silentCount} polls (rms=${rms.toFixed(1)})`);
+          this.clearSilenceTimers();
+          onSilent();
+        }
+      } else {
+        if (silentCount > 0) adapterLog(`silence reset (rms=${rms.toFixed(1)}, was ${silentCount}/${OpenAIAdapter.SILENCE_CONFIRM_COUNT})`);
+        silentCount = 0;
+      }
+    }, OpenAIAdapter.SILENCE_POLL_MS);
+
+    // Safety cap
+    this.silenceMaxTimer = setTimeout(() => {
+      this.clearSilenceTimers();
+      onSilent();
+    }, OpenAIAdapter.SILENCE_MAX_WAIT_MS);
+  }
+
+  private clearSilenceTimers(): void {
+    if (this.silencePollTimer) {
+      clearInterval(this.silencePollTimer);
+      this.silencePollTimer = null;
+    }
+    if (this.silenceMaxTimer) {
+      clearTimeout(this.silenceMaxTimer);
+      this.silenceMaxTimer = null;
+    }
+  }
+
+  /**
+   * Begin the idle transition: wait for audible silence, unmute, then go idle.
+   *
+   * Called from both `response.done` (when buffer already stopped) and
+   * `output_audio_buffer.stopped` (when response already done). Both event
+   * orderings converge here so the idle path is defined in one place.
+   */
+  private beginIdleTransition(): void {
+    adapterLog("beginIdleTransition — waiting for silence…");
+    this.waitForSilence(() => {
+      adapterLog("silence confirmed → idle");
+      this.autoUnmuteAfterSpeaking();
+      if (!this.activeResponseRef) {
+        this.handlers?.onAgentStatusChange("idle");
+      }
+    });
+  }
+
   /** Clear the audio-stuck safety timer (normal path: buffer.stopped fired on time). */
   private clearAudioStuckTimer(): void {
     if (this.audioStuckTimer) {
@@ -498,6 +594,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
     this.activeResponseRef = false;
     this.clearAudioStuckTimer();
+    this.clearSilenceTimers();
 
     // Stop WebSocket audio playback
     if (this.transport === "websocket") {
@@ -527,7 +624,6 @@ export class OpenAIAdapter implements RealtimeAdapter {
     const transport = (this.session as any)?.transport;
     transport?.sendEvent({ type: "input_audio_buffer.commit" });
     if (!this.activeResponseRef) {
-      this.activeResponseRef = true;
       transport?.sendEvent({ type: "response.create" });
     }
   }
@@ -556,7 +652,6 @@ export class OpenAIAdapter implements RealtimeAdapter {
       },
     });
     if (triggerResponse && !this.activeResponseRef) {
-      this.activeResponseRef = true;
       transport?.sendEvent({ type: "response.create" });
     }
   }
@@ -1068,28 +1163,17 @@ export class OpenAIAdapter implements RealtimeAdapter {
           case "response.created":
             this.activeResponseRef = true;
             this.responseHadAudio = false;
+            adapterLog("response.created → thinking");
             handlers.onAgentStatusChange("thinking");
             break;
           case "response.done": {
             this.activeResponseRef = false;
             const hadAudio = this.responseHadAudio;
             this.responseHadAudio = false;
-            // Unmute only if audio already stopped; otherwise defer to
-            // output_audio_buffer.stopped (WebRTC audio outlives response.done).
-            if (!this.audioPlayingRef) this.autoUnmuteAfterSpeaking();
             queueMicrotask(() => this.emitUsageUpdate());
-            // WebRTC: audio may still be playing through the media track.
-            // Only go idle if the audio buffer has already stopped.
-            if (!this.audioPlayingRef) {
-              // If the response produced no audio (AI decided not to respond,
-              // e.g. during a mid-sentence VAD pause), stay in "listening"
-              // instead of flashing "idle" — the AI is still actively listening.
-              handlers.onAgentStatusChange(hadAudio ? "idle" : "listening");
-            } else {
-              // Safety: response.done fired but audio is still "playing".
-              // If output_audio_buffer.stopped never fires (WebRTC edge case),
-              // the adapter would be stuck in "speaking" forever. Start a safety
-              // timer that clears the stuck state.
+
+            if (this.audioPlayingRef) {
+              adapterLog(`response.done — audioPlaying=true, deferring to buffer.stopped (safety=${OpenAIAdapter.AUDIO_STUCK_TIMEOUT_MS}ms)`);
               this.clearAudioStuckTimer();
               this.audioStuckTimer = setTimeout(() => {
                 if (this.audioPlayingRef && !this.activeResponseRef) {
@@ -1099,6 +1183,13 @@ export class OpenAIAdapter implements RealtimeAdapter {
                   handlers.onAgentStatusChange("idle");
                 }
               }, OpenAIAdapter.AUDIO_STUCK_TIMEOUT_MS);
+            } else if (hadAudio) {
+              adapterLog("response.done — hadAudio + buffer already stopped → beginIdleTransition");
+              this.beginIdleTransition();
+            } else {
+              adapterLog("response.done — no audio → listening");
+              this.autoUnmuteAfterSpeaking();
+              handlers.onAgentStatusChange("listening");
             }
             break;
           }
@@ -1114,17 +1205,23 @@ export class OpenAIAdapter implements RealtimeAdapter {
             this.autoMuteForSpeaking();
             break;
           case "output_audio_buffer.started":
+            adapterLog("buffer.started → speaking");
             this.audioPlayingRef = true;
             this.responseHadAudio = true;
+            this.clearAudioStuckTimer();
+            this.clearSilenceTimers();
             handlers.onAgentStatusChange("speaking");
             this.autoMuteForSpeaking();
             break;
           case "output_audio_buffer.stopped":
+            adapterLog(`buffer.stopped — activeResponse=${this.activeResponseRef}`);
             this.audioPlayingRef = false;
             this.clearAudioStuckTimer();
-            this.autoUnmuteAfterSpeaking();
             if (!this.activeResponseRef) {
-              handlers.onAgentStatusChange("idle");
+              adapterLog("buffer.stopped — response already done → beginIdleTransition");
+              this.beginIdleTransition();
+            } else {
+              adapterLog("buffer.stopped — response still active, deferring to response.done");
             }
             break;
           case "output_audio_buffer.cleared":
@@ -1135,6 +1232,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
             // gets stuck in "speaking" when the new response produces no audio.
             this.audioPlayingRef = false;
             this.clearAudioStuckTimer();
+            this.clearSilenceTimers();
             if (!this.interruptible && this.activeResponseRef) {
               // Non-interruptible with an active response: audio was cleared
               // (likely by a new response.create), stay in current status
@@ -1204,7 +1302,6 @@ export class OpenAIAdapter implements RealtimeAdapter {
     // MCP tool completion
     sess.on("mcp_tool_call_completed", () => {
       if (!this.activeResponseRef) {
-        this.activeResponseRef = true;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (session as any).transport?.sendEvent({ type: "response.create" });
       }

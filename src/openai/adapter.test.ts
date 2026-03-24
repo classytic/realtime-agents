@@ -635,6 +635,135 @@ describe('OpenAIAdapter — disconnect resets state', () => {
 });
 
 // =============================================================================
+// Silence detection (waitForSilence)
+// =============================================================================
+
+function createMockAnalyser(dataFn: (buf: Uint8Array) => void): AnalyserNode {
+  return {
+    fftSize: 256,
+    getByteTimeDomainData: (buf: Uint8Array) => dataFn(buf),
+  } as unknown as AnalyserNode;
+}
+
+describe('OpenAIAdapter — waitForSilence', () => {
+  let adapter: OpenAIAdapter;
+
+  beforeEach(() => {
+    adapter = new OpenAIAdapter({ transport: 'webrtc' });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('calls onSilent after consecutive silent polls when analyser is available', () => {
+    // Mock analyser that always returns silence (all 128)
+    const analyser = createMockAnalyser((buf) => buf.fill(128));
+    setPrivate(adapter, 'webrtcAnalyser', analyser);
+
+    const onSilent = vi.fn();
+    (adapter as any).waitForSilence(onSilent);
+
+    // Need SILENCE_CONFIRM_COUNT (3) consecutive polls at SILENCE_POLL_MS (50ms)
+    vi.advanceTimersByTime(50); // poll 1
+    expect(onSilent).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(50); // poll 2
+    expect(onSilent).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(50); // poll 3 — confirmed silent
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets silence count when audio energy is detected', () => {
+    let callCount = 0;
+    // Returns audio on 3rd poll, then silence again
+    const analyser = createMockAnalyser((buf) => {
+      callCount++;
+      if (callCount === 3) {
+        // Simulate active audio: ±30 around center
+        for (let i = 0; i < buf.length; i++) buf[i] = 128 + ((i % 2 === 0) ? 20 : -20);
+      } else {
+        buf.fill(128);
+      }
+    });
+    setPrivate(adapter, 'webrtcAnalyser', analyser);
+
+    const onSilent = vi.fn();
+    (adapter as any).waitForSilence(onSilent);
+
+    vi.advanceTimersByTime(50); // poll 1: silent (count=1)
+    vi.advanceTimersByTime(50); // poll 2: silent (count=2)
+    vi.advanceTimersByTime(50); // poll 3: AUDIO (count reset to 0)
+    expect(onSilent).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(50); // poll 4: silent (count=1)
+    vi.advanceTimersByTime(50); // poll 5: silent (count=2)
+    vi.advanceTimersByTime(50); // poll 6: silent (count=3) — now confirmed
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to fixed delay when no analyser is available', () => {
+    setPrivate(adapter, 'webrtcAnalyser', null);
+
+    const onSilent = vi.fn();
+    (adapter as any).waitForSilence(onSilent);
+
+    vi.advanceTimersByTime(499);
+    expect(onSilent).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires safety cap if silence never detected', () => {
+    // Mock analyser that always returns loud audio
+    const analyser = createMockAnalyser((buf) => {
+      for (let i = 0; i < buf.length; i++) buf[i] = 128 + ((i % 2 === 0) ? 50 : -50);
+    });
+    setPrivate(adapter, 'webrtcAnalyser', analyser);
+
+    const onSilent = vi.fn();
+    (adapter as any).waitForSilence(onSilent);
+
+    // Advance past many polls — still active audio
+    vi.advanceTimersByTime(2999);
+    expect(onSilent).not.toHaveBeenCalled();
+    // Safety cap at 3000ms
+    vi.advanceTimersByTime(1);
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it('clearSilenceTimers cancels pending detection', () => {
+    const analyser = createMockAnalyser((buf) => buf.fill(128));
+    setPrivate(adapter, 'webrtcAnalyser', analyser);
+
+    const onSilent = vi.fn();
+    (adapter as any).waitForSilence(onSilent);
+
+    vi.advanceTimersByTime(50); // poll 1
+    (adapter as any).clearSilenceTimers();
+
+    vi.advanceTimersByTime(5000); // advance well past everything
+    expect(onSilent).not.toHaveBeenCalled();
+  });
+
+  it('new waitForSilence call cancels the previous one', () => {
+    const analyser = createMockAnalyser((buf) => buf.fill(128));
+    setPrivate(adapter, 'webrtcAnalyser', analyser);
+
+    const onSilent1 = vi.fn();
+    const onSilent2 = vi.fn();
+
+    (adapter as any).waitForSilence(onSilent1);
+    vi.advanceTimersByTime(50); // poll 1 for first call
+    (adapter as any).waitForSilence(onSilent2); // cancels first
+
+    vi.advanceTimersByTime(150); // 3 polls for second call
+    expect(onSilent1).not.toHaveBeenCalled();
+    expect(onSilent2).toHaveBeenCalledTimes(1);
+  });
+});
+
+// =============================================================================
 // Debug logging
 // =============================================================================
 
