@@ -178,6 +178,15 @@ export class OpenAIAdapter implements RealtimeAdapter {
   /** Source MediaStream for WebRTC — used to disable tracks at source. */
   private webrtcMediaStream: MediaStream | null = null;
 
+  /**
+   * Safety timer: if `response.done` fires while `audioPlayingRef` is still true,
+   * we defer status change to `output_audio_buffer.stopped`. But if that event
+   * never fires (WebRTC edge case), the adapter gets stuck in "speaking" forever.
+   * This timer clears the stuck state after a reasonable delay.
+   */
+  private audioStuckTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly AUDIO_STUCK_TIMEOUT_MS = 5_000;
+
   // ── WebRTC output audio visualization ──
   private webrtcAudioCtx: AudioContext | null = null;
   private webrtcAnalyser: AnalyserNode | null = null;
@@ -390,6 +399,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
     this.cleanupWebRTCAnalyser();
     this.cleanupWebSocketAudio();
+    this.clearAudioStuckTimer();
     this.activeResponseRef = false;
     this.audioPlayingRef = false;
     this.responseHadAudio = false;
@@ -443,6 +453,14 @@ export class OpenAIAdapter implements RealtimeAdapter {
     }
   }
 
+  /** Clear the audio-stuck safety timer (normal path: buffer.stopped fired on time). */
+  private clearAudioStuckTimer(): void {
+    if (this.audioStuckTimer) {
+      clearTimeout(this.audioStuckTimer);
+      this.audioStuckTimer = null;
+    }
+  }
+
   /** Auto-mute the mic when AI starts speaking in non-interruptible mode. Idempotent. */
   private autoMuteForSpeaking(): void {
     if (this.interruptible || this.autoMutedForNonInterrupt) return;
@@ -479,6 +497,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
       /* no active response — safe to ignore */
     }
     this.activeResponseRef = false;
+    this.clearAudioStuckTimer();
 
     // Stop WebSocket audio playback
     if (this.transport === "websocket") {
@@ -1066,6 +1085,20 @@ export class OpenAIAdapter implements RealtimeAdapter {
               // e.g. during a mid-sentence VAD pause), stay in "listening"
               // instead of flashing "idle" — the AI is still actively listening.
               handlers.onAgentStatusChange(hadAudio ? "idle" : "listening");
+            } else {
+              // Safety: response.done fired but audio is still "playing".
+              // If output_audio_buffer.stopped never fires (WebRTC edge case),
+              // the adapter would be stuck in "speaking" forever. Start a safety
+              // timer that clears the stuck state.
+              this.clearAudioStuckTimer();
+              this.audioStuckTimer = setTimeout(() => {
+                if (this.audioPlayingRef && !this.activeResponseRef) {
+                  adapterLog("audio stuck safety: forcing idle after response.done + audio timeout");
+                  this.audioPlayingRef = false;
+                  this.autoUnmuteAfterSpeaking();
+                  handlers.onAgentStatusChange("idle");
+                }
+              }, OpenAIAdapter.AUDIO_STUCK_TIMEOUT_MS);
             }
             break;
           }
@@ -1088,6 +1121,7 @@ export class OpenAIAdapter implements RealtimeAdapter {
             break;
           case "output_audio_buffer.stopped":
             this.audioPlayingRef = false;
+            this.clearAudioStuckTimer();
             this.autoUnmuteAfterSpeaking();
             if (!this.activeResponseRef) {
               handlers.onAgentStatusChange("idle");
@@ -1095,8 +1129,18 @@ export class OpenAIAdapter implements RealtimeAdapter {
             break;
           case "output_audio_buffer.cleared":
             adapterLog(`buffer cleared — interruptible=${this.interruptible}, activeResponse=${this.activeResponseRef}`);
-            if (!this.interruptible && this.activeResponseRef) break;
+            // Always reset audioPlayingRef — the buffer is gone regardless of mode.
+            // A new response.create cancels the previous response's audio buffer;
+            // if we don't reset here, audioPlayingRef stays true and the adapter
+            // gets stuck in "speaking" when the new response produces no audio.
             this.audioPlayingRef = false;
+            this.clearAudioStuckTimer();
+            if (!this.interruptible && this.activeResponseRef) {
+              // Non-interruptible with an active response: audio was cleared
+              // (likely by a new response.create), stay in current status
+              // and let the new response drive the next state transition.
+              break;
+            }
             if (!this.activeResponseRef) {
               handlers.onAgentStatusChange("idle");
             }
